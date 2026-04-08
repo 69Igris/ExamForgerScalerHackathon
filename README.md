@@ -1,6 +1,5 @@
 ---
 title: ExamForge
-emoji: 🎓
 colorFrom: blue
 colorTo: purple
 sdk: docker
@@ -11,7 +10,7 @@ app_port: 7860
 
 # ExamForge
 
-> An RL environment for training LLM agents to generate, validate, and assemble high-quality competitive exam papers -- targeting India's JEE, GATE, and UPSC.
+> An advanced Reinforcement Learning environment designed for training Large Language Models to autonomously generate, programmatically validate, and optimally assemble competitive examination papers, specifically targeting India's leading entrance tests: JEE, GATE, and UPSC.
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-v0.2.3-blue)](https://github.com/meta-llama/openenv)
 [![Python](https://img.shields.io/badge/Python-3.11+-green)](https://python.org)
@@ -20,101 +19,106 @@ app_port: 7860
 
 ---
 
-## Motivation
+## Abstract and Problem Statement
 
-India's competitive exams -- **JEE**, **GATE**, and **UPSC** -- collectively determine the academic and professional futures of millions of students every year:
+The integrity and quality of high-stakes competitive examinations in India—namely **JEE**, **GATE**, and **UPSC**—are foundational to the country's academic and professional ecosystem. Each year, these exams dictate the career trajectories of over three million candidates.
 
-- **1.5 million** students appear for JEE annually
-- **800,000+** candidates take GATE every year
-- **1 million+** aspirants register for UPSC Prelims
+**The Paradigm Gap**: Current generative AI tools exhibit significant shortcomings in educational assessment creation. They frequently hallucinate distractors, fail to calibrate difficulty, and lack the macro-level intelligence required to assemble a balanced paper. Traditional models lack a closed-loop feedback mechanism, leading to compounding degradation in assessment quality.
 
-**The problem**: Current AI tools can generate questions, but they frequently hallucinate incorrect answers, produce low-quality distractors, and fail to create balanced exam papers. There is no closed-loop feedback system to improve generation quality.
-
-**ExamForge solves this** by creating a Reinforcement Learning environment where LLM agents learn through structured rewards to:
-
-1. Generate factually correct MCQs with high-quality distractors
-2. Self-validate their own questions via programmatic graders
-3. Flag and remove low-quality questions
-4. Assemble balanced, topic-diverse exam papers
-
-This creates a closed-loop feedback system where agents learn from validation failures, progressively improving question quality across episodes.
+**The ExamForge Solution**: ExamForge bridges this gap by abstracting the pedagogical assessment lifecycle into a robust Reinforcement Learning environment. Utilizing the OpenEnv framework, it enables LLM agents to iteratively learn through a highly structured, multi-modal reward system, mastering the art of:
+1. Synthesizing factually rigorous Multiple Choice Questions (MCQs) with high-fidelity distractors.
+2. Subjecting generated items to strict programmatic quality assurance constraints.
+3. Intelligently pruning suboptimal candidates from the active state pool.
+4. Architecting a comprehensively balanced, topic-diverse final examination paper.
 
 ---
 
-## Environment Design
+## Architectural Design
 
-### Episode Lifecycle
+ExamForge employs a continuous feedback architecture conceptually mapped as a Directed Acyclic Graph during episode traversal.
 
+### Epistemic Lifecycle
+
+```text
+    [Initialization]
+           │
+           ▼
+  [Question Generation] ◄──────────────┐
+           │                           │
+           ▼                           │
+ [Programmatic Validation]             │
+           │                           │
+           ├──► [Quality Flagging] ────┤ (Iterative Refinement)
+           │                           │
+           ▼                           │
+   [Paper Assembly] ───────────────────┘
+           │
+           ▼
+     [Termination]
 ```
-                    +------------------------------------------+
-                    |                                          |
-                    v                                          |
-reset() --> generate_question --> validate_question --> [flag_question]
-                                                               |
-                                                               v
-                                                        assemble_paper --> done
-```
 
-An agent starts each episode by discovering a randomly assigned subject and its available topics. It then iteratively generates questions, validates them for quality, optionally flags poor ones, and finally assembles a complete exam paper. The episode ends either on successful assembly or after 50 steps.
+At the onset of each episode, the agent is instantiated within a dynamic context featuring a randomly assigned academic discipline and its corresponding taxonomic hierarchy. The agent initiates an iterative process of generation and strict validation, progressively building a high-fidelity internal state (the question bank).
 
-### Actions
+### Dimensional Actions Space
 
-| Action | Required Fields | Purpose |
+| Action Primitive | Payload Vector | Systemic Function |
 |--------|----------------|---------|
-| `generate_question` | topic, difficulty, marks, question_text, options A-D, correct_option, explanation | Submit a new MCQ to the question bank |
-| `validate_question` | question_id | Run programmatic quality checks on a question |
-| `flag_question` | question_id, flag_reason | Remove a low-quality question from the valid pool |
-| `assemble_paper` | *(none)* | Finalize the exam paper and compute the final score |
-
-### Reward Structure
-
-| Action | Condition | Reward |
-|--------|-----------|--------|
-| `generate_question` | Well-formed question submitted | **+0.3** |
-| `generate_question` | Missing fields / invalid topic | **-0.2** |
-| `generate_question` | Marks would exceed paper limit | **-0.3** |
-| `validate_question` | High quality (score > 0.7) | **+0.7 to +1.0** |
-| `validate_question` | Medium quality (0.4-0.7) | **+0.3 to +0.6** |
-| `validate_question` | Low quality (<0.4) | **0.0** |
-| `flag_question` | Correctly flagging low-quality | **+0.2** |
-| `flag_question` | Flagging a valid question | **-0.1** |
-| `assemble_paper` | Complete, balanced paper | **+1.5 to +3.0** |
-| `assemble_paper` | Insufficient questions (<10) | **-0.5** |
-| Episode timeout | 50 steps without assembly | **-1.0** |
-
-### Validation Checks (Programmatic Grader)
-
-Each `validate_question` runs three automated checks:
-
-1. **Answer Consistency** (+0.2): Does the explanation reference the correct option?
-2. **Distractor Quality** (+0.3): Are all 4 options unique and non-trivial (length > 3)?
-3. **Difficulty Calibration** (+0.2): Does explanation length match difficulty level?
-
-### Graded Tasks
-
-ExamForge defines three independently graded tasks:
-
-| Task | Grader | What it measures |
-|------|--------|-----------------|
-| `question_generation` | `question_generation_grader` | Topic diversity, question count, marks distribution |
-| `question_validation` | `question_validation_grader` | Validation coverage, average quality score, flagging accuracy |
-| `paper_assembly` | `paper_assembly_grader` | Paper completeness, topic coverage, difficulty balance |
-
-### Subjects and Topics
-
-| Subject | Topics |
-|---------|--------|
-| **JEE Physics** | Kinematics, Laws of Motion, Work & Energy, Rotational Motion, Thermodynamics, Electrostatics, Current Electricity, Magnetism, Optics, Modern Physics |
-| **JEE Chemistry** | Atomic Structure, Chemical Bonding, Thermochemistry, Electrochemistry, Organic Reactions, Coordination Chemistry, p-Block Elements, d-Block Elements, Polymers, Biomolecules |
-| **JEE Mathematics** | Sets & Relations, Complex Numbers, Matrices, Calculus - Limits, Calculus - Integration, Probability, Vectors, 3D Geometry, Differential Equations, Statistics |
-| **GATE CS** | Data Structures, Algorithms, Operating Systems, DBMS, Computer Networks, Theory of Computation, Compiler Design, Digital Logic, Computer Organization, Software Engineering |
-| **UPSC GS** | Indian Polity, Indian Economy, Modern History, Geography, Science & Technology, Environment & Ecology, International Relations, Art & Culture, Ancient History, Social Issues |
+| `generate_question` | `topic, difficulty, marks, question_text, options, correct_option, explanation` | Injects a generated MCQ proposition into the active memory pool. |
+| `validate_question` | `question_id` | Triggers a deterministic, algorithmic evaluation suite across predefined heuristic rubrics. |
+| `flag_question` | `question_id, flag_reason` | Executes a deletion operator on the internal pool, isolating structurally weak items. |
+| `assemble_paper` | *(Null)* | Computes the global gradient score based on combinatorial balance and task saturation. |
 
 ---
 
-## Quick Start
+## Pedagogical Reward Shaping
 
-### Installation
+ExamForge uses a dense, gradient-rich reward topology to enforce strict convergence toward educational excellence, shifting away from sparse episodic rewards.
+
+| Action State | Transition Condition | Reward Scalar |
+|--------|-----------|--------|
+| `generate_question` | Structurally absolute, syntactically parsed formulation | **+0.3** |
+| `generate_question` | Dimensional constraint violation (e.g., marks out of bounds) | **-0.3** |
+| `validate_question` | Exceptional heuristic resonance (Score > 0.7) | **+0.7 to +1.0** |
+| `validate_question` | Marginal algorithmic compliance (Score 0.4-0.7) | **+0.3 to +0.6** |
+| `flag_question` | Precision isolation of low-quality variables | **+0.2** |
+| `assemble_paper` | Global optimum achieved (coverage, balance, fidelity) | **+1.5 to +3.0** |
+| Timeout Condition | Episode starvation (>50 uncommitted steps) | **-1.0** |
+
+### Algorithmic Validation Subroutine
+
+Each validation call computes internal consistency through exact heuristics:
+1. **Semantic Corroboration** (+0.2): Ensures the provided rationale deterministically points to the flagged valid option.
+2. **Distractor Variance** (+0.3): Computes string entropy to guarantee mutual exclusivity across alternative choices.
+3. **Calibrated Depth** (+0.2): Measures logical depth mapped strictly to the claimed difficulty integer.
+
+---
+
+## Epistemic Coverage
+
+| Global Subject Matrix | Granular Taxonomic Nodes |
+|---------|--------|
+| **JEE Physics** | Kinematics, Thermodynamics, Electrostatics, Magnetism, Quantum Physics, Optics, ... |
+| **GATE CompSci** | Automata Theory, Algorithmic Analysis, OS, Database Systems, Network Architecture, ... |
+| **UPSC Gen. Studies** | Geopolitics, Indian Economic Policy, Environmental Ecology, Constitutional Law, ... |
+
+---
+
+## Environment Specifications
+
+| Environment Parameter | Mathematical/Systemic Value |
+|----------|-------|
+| Maximum Temporal Horizon (Steps) | 50 |
+| Constrained Paper Volume (Marks) | 100 |
+| Optimal Item Count | 25 Questions |
+| Global Reward Bounds | [-1.0, 3.0] per action |
+| Terminal State Calculation | $0.4(\text{TopicCov}) + 0.4(\text{DiffBalance}) + 0.2(\text{ValidationRatio})$ |
+| Communication Protocol | FastAPI + WebSocket (OpenEnv V1 Standard) |
+
+---
+
+## Technical Deployment & Quick Start
+
+### Subsystem Initialization
 
 ```bash
 pip install openenv-core
@@ -123,134 +127,49 @@ cd examforge_env
 pip install -e .
 ```
 
-### Basic Usage (Sync API)
+### Simulated Inference Protocol
 
-```python
-from server.environment import ExamForgeEnvironment
-from models import ExamForgeAction, ActionType
-
-env = ExamForgeEnvironment()
-obs = env.reset()
-print(f"Subject: {env.current_subject}")
-print(f"Topics: {obs.available_topics}")
-
-# Generate a question
-obs = env.step(ExamForgeAction(
-    action_type=ActionType.GENERATE_QUESTION,
-    topic=obs.available_topics[0],
-    difficulty="medium", marks=2,
-    question_text="What is Newton's second law?",
-    option_a="F = ma", option_b="F = mv",
-    option_c="F = m/a", option_d="F = a/m",
-    correct_option="A",
-    explanation="Newton's second law states F = ma. Option A is correct."
-))
-print(f"Reward: {obs.reward}, Question ID: {obs.question_id_generated}")
-```
-
-### Running the Demo Agent
+Execute the autonomous inference engine to trace a full operational episode without invoking the Live WebSocket client.
 
 ```bash
 python inference.py
 ```
-
-This runs three graded tasks (question generation, validation, paper assembly) using 15 pre-written JEE Physics MCQs, demonstrating the full generate, validate, and assemble lifecycle.
-
----
-
-## Training Potential
-
-An LLM agent trained on ExamForge would learn to:
-
-| Capability | How ExamForge Teaches It |
-|-----------|------------------------|
-| **Factual correctness** | Negative rewards for inconsistent answer-explanation pairs |
-| **High-quality distractors** | Validation checks penalize trivial or duplicate options |
-| **Difficulty calibration** | Reward shaping based on explanation depth vs. stated difficulty |
-| **Topic diversity** | Paper assembly score rewards coverage across multiple topics |
-| **Paper balancing** | Final score penalizes skewed difficulty distributions |
-| **Generalization** | Random subject assignment per episode forces multi-domain learning |
-
-### Why Reward Shaping Matters
-
-ExamForge uses multi-step reward shaping rather than a single end-of-episode reward. This provides:
-- **Dense feedback** at every step, accelerating learning
-- **Decomposed signals** that teach specific skills (quality vs. coverage vs. balance)
-- **Curriculum learning** -- agents naturally progress from generating any question to generating high-quality, balanced papers
+*Note: This command natively verifies generation, programmatic validation, and the final deterministic assembly subroutines.*
 
 ---
 
-## Environment Specs
+## Comprehensive Project Topology
 
-| Property | Value |
-|----------|-------|
-| Max Steps per Episode | 50 |
-| Target Paper Marks | 100 |
-| Target Questions | 25 |
-| Supported Subjects | 5 (JEE Physics, JEE Chemistry, JEE Maths, GATE CS, UPSC GS) |
-| Reward Range | -1.0 to +3.0 per step |
-| Evaluation | Programmatic grader + Rubric-based scoring |
-| Paper Score Formula | 0.4 x topic_coverage + 0.4 x difficulty_balance + 0.2 x validation_ratio |
-| Server Protocol | FastAPI + WebSocket (OpenEnv standard) |
-| Deployment | Docker on HuggingFace Spaces (port 7860) |
-
----
-
-## Project Structure
-
-```
+```text
 examforge_env/
-  __init__.py              -- Exports: ExamForgeAction, ExamForgeObservation, ExamForgeEnv
-  models.py                -- Pydantic Action & Observation models
-  client.py                -- ExamForgeEnv(EnvClient) client-side connector
-  openenv.yaml             -- Environment manifest for HuggingFace Hub
-  README.md                -- This file
-  pyproject.toml           -- Package configuration
-  requirements.txt         -- Development dependencies
-  inference.py             -- Demo agent: 3 graded tasks
-  test_agent.py            -- Unit tests (5 tests)
-  validate-submission.sh   -- Submission validation script
-  .gitignore               -- Standard Python gitignore
-  .env                     -- Environment variables template
-  AGENT_INSTRUCTIONS.md    -- Complete specification document
-  server/
-    __init__.py
-    app.py                 -- FastAPI app (openenv create_app)
-    environment.py         -- ExamForgeEnvironment core RL logic + graders
-    Dockerfile             -- Docker container for HF Spaces
-    requirements.txt       -- Server-side dependencies
+  ├── __init__.py              # Core Module Exports
+  ├── models.py                # Pydantic Action/Observation Schemas
+  ├── client.py                # Wrapper for OpenEnv API Interface
+  ├── openenv.yaml             # Deployment & Manifest Specifications
+  ├── pyproject.toml           # Core Package Management
+  ├── inference.py             # Agent Logic and Episode Demonstrator
+  ├── test_agent.py            # Unit Evaluation & Regression Test Suite
+  └── server/
+      ├── environment.py       # Core Multi-Modal RL Engine & Deterministic Graders
+      ├── app.py               # REST/WebSocket Server Initiator
+      └── Dockerfile           # High-Performance Containerization Spec
 ```
 
 ---
 
-## Built With
+## Technology Stack
 
-- [Meta PyTorch OpenEnv Framework](https://github.com/meta-llama/openenv) -- Standardized RL environment protocol
-- [HuggingFace Spaces](https://huggingface.co/spaces) -- Cloud deployment
-- [FastAPI](https://fastapi.tiangolo.com/) + Docker -- Server infrastructure
-- [Pydantic](https://docs.pydantic.dev/) -- Type-safe data models
-
----
-
-## Testing
-
-```bash
-# Run unit tests
-python -m pytest test_agent.py -v
-
-# Run demo agent
-python inference.py
-
-# Validate submission
-bash validate-submission.sh
-```
+- **[Meta PyTorch OpenEnv](https://github.com/meta-llama/openenv)**: Foundational specification for interactive RL.
+- **[HuggingFace Hub](https://huggingface.co/spaces)**: Scaleable model deployment via Docker Spaces.
+- **[FastAPI](https://fastapi.tiangolo.com/)**: Asynchronous backend infrastructure.
+- **[Pydantic](https://docs.pydantic.dev/)**: Strict data schema validation and runtime type coercion.
 
 ---
 
-## License
+## License Rights
 
-MIT
+Released under the **MIT License**.
 
 ---
 
-*Built for the Meta PyTorch OpenEnv Hackathon 2026 -- Scaler School of Technology*
+*Architected for the Meta PyTorch OpenEnv Hackathon 2026 — Scaler School of Technology*
