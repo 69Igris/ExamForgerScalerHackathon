@@ -1,0 +1,19 @@
+name: examforge_env
+version: "1.0.0"
+description: >
+  ExamForge: An RL environment for training LLM agents to generate, validate,
+  and assemble high-quality competitive exam papers. Targets JEE, GATE, and 
+  UPSC domains with multi-step reward shaping and programmatic graders.
+author: "Team ExamForge"
+tags:
+  - education
+  - reasoning
+  - question-generation
+  - india
+  - jee
+  - gate
+  - upsc
+  - rl-training
+action_class: ExamForgeAction
+observation_class: ExamForgeObservation
+max_episode_steps: 50
