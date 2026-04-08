@@ -440,3 +440,109 @@ class ExamForgeEnvironment(Environment):
             num_questions_in_bank=len(self.question_bank),
             num_valid_questions=len(valid_qs),
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task Grader Functions (referenced from openenv.yaml)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def question_generation_grader(trajectory: list) -> float:
+    """Grade an agent's question generation performance.
+    
+    Evaluates:
+    - Number of well-formed questions generated
+    - Topic diversity across generated questions
+    - Marks distribution quality
+    
+    Returns a score from 0.0 to 1.0.
+    """
+    if not trajectory:
+        return 0.0
+
+    generated = [s for s in trajectory if s.get("action_type") == "generate_question" and s.get("success", False)]
+    if not generated:
+        return 0.0
+
+    # Score components
+    count_score = min(len(generated) / 15.0, 1.0)  # Target 15 questions
+    topics = set(s.get("topic", "") for s in generated)
+    topic_score = min(len(topics) / 5.0, 1.0)  # Target 5+ unique topics
+    
+    # Marks diversity
+    marks_set = set(s.get("marks", 0) for s in generated)
+    marks_score = min(len(marks_set) / 3.0, 1.0)  # Should use 1, 2, and 4
+
+    return 0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score
+
+
+def question_validation_grader(trajectory: list) -> float:
+    """Grade an agent's question validation performance.
+    
+    Evaluates:
+    - Proportion of generated questions that were validated
+    - Average validation score achieved
+    - Correct flagging of low-quality questions
+    
+    Returns a score from 0.0 to 1.0.
+    """
+    if not trajectory:
+        return 0.0
+    
+    generated = [s for s in trajectory if s.get("action_type") == "generate_question" and s.get("success", False)]
+    validated = [s for s in trajectory if s.get("action_type") == "validate_question" and s.get("success", False)]
+    flagged = [s for s in trajectory if s.get("action_type") == "flag_question" and s.get("success", False)]
+
+    if not generated:
+        return 0.0
+
+    # Validation coverage
+    coverage_score = min(len(validated) / max(len(generated), 1), 1.0)
+    
+    # Average validation quality
+    val_scores = [s.get("validation_score", 0.0) for s in validated]
+    avg_quality = sum(val_scores) / max(len(val_scores), 1)
+    
+    # Flagging accuracy (reward flagging low-quality)
+    flag_score = min(len(flagged) * 0.25, 1.0) if flagged else 0.5
+
+    return 0.4 * coverage_score + 0.4 * avg_quality + 0.2 * flag_score
+
+
+def paper_assembly_grader(trajectory: list) -> float:
+    """Grade an agent's paper assembly performance.
+    
+    Evaluates:
+    - Whether assembly was attempted and succeeded
+    - Topic coverage in the final paper
+    - Difficulty distribution balance
+    - Overall paper score
+    
+    Returns a score from 0.0 to 1.0.
+    """
+    if not trajectory:
+        return 0.0
+
+    assembly = [s for s in trajectory if s.get("action_type") == "assemble_paper"]
+    if not assembly:
+        return 0.0
+
+    last_assembly = assembly[-1]
+    if not last_assembly.get("success", False):
+        return 0.1  # Attempted but failed
+
+    # Use the final paper score directly
+    paper_score = last_assembly.get("final_paper_score", 0.0)
+    topic_coverage = last_assembly.get("topic_coverage_score", 0.0)
+    
+    # Check difficulty distribution
+    diff_dist = last_assembly.get("difficulty_distribution", {})
+    total_q = sum(diff_dist.values()) if diff_dist else 0
+    if total_q > 0:
+        ideal = {"easy": 0.30, "medium": 0.50, "hard": 0.20}
+        actual = {k: diff_dist.get(k, 0) / total_q for k in ideal}
+        deviation = sum(abs(actual[k] - ideal[k]) for k in ideal) / len(ideal)
+        balance_score = max(0.0, 1.0 - deviation)
+    else:
+        balance_score = 0.0
+
+    return 0.4 * paper_score + 0.3 * topic_coverage + 0.3 * balance_score

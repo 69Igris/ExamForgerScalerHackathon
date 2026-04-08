@@ -1,4 +1,9 @@
+spec_version: 1
 name: examforge_env
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
 version: "1.0.0"
 description: >
   ExamForge: An RL environment for training LLM agents to generate, validate,
@@ -17,3 +22,23 @@ tags:
 action_class: ExamForgeAction
 observation_class: ExamForgeObservation
 max_episode_steps: 50
+
+tasks:
+  - name: question_generation
+    description: >
+      Generate high-quality MCQ questions across multiple topics for competitive
+      exams. The agent must produce well-formed questions with valid distractors,
+      correct answers, and explanations.
+    grader: server.environment:question_generation_grader
+
+  - name: question_validation
+    description: >
+      Validate generated questions using programmatic checks for answer consistency,
+      distractor quality, and difficulty calibration. Flag low-quality questions.
+    grader: server.environment:question_validation_grader
+
+  - name: paper_assembly
+    description: >
+      Assemble a complete exam paper from validated questions ensuring topic coverage,
+      difficulty balance, and marks constraints are met.
+    grader: server.environment:paper_assembly_grader
