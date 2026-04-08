@@ -24,6 +24,11 @@ from server.environment import ExamForgeEnvironment, SUBJECT_TOPICS
 from models import ExamForgeAction, ActionType
 
 
+def clamp_score(score: float) -> float:
+    """Clamp score to strictly within (0, 1) — never exactly 0.0 or 1.0."""
+    return max(0.01, min(0.99, score))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 15 Realistic JEE Physics MCQs
 # Covering ≥5 topics, mix of easy (5), medium (7), hard (3)
@@ -270,7 +275,7 @@ def run_question_generation_task():
     count_score = min(len(SAMPLE_QUESTIONS) / 15.0, 1.0)
     topic_score = min(len(topics) / 5.0, 1.0)
     marks_score = min(len(marks_set) / 3.0, 1.0)
-    final_score = 0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score
+    final_score = clamp_score(0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score)
 
     print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
     return final_score
@@ -356,7 +361,7 @@ def run_question_validation_task():
     coverage = min(len(validation_scores) / max(len(generated_ids), 1), 1.0)
     avg_quality = sum(validation_scores) / max(len(validation_scores), 1)
     flag_score = min(flagged * 0.25, 1.0) if flagged else 0.5
-    final_score = 0.4 * coverage + 0.4 * avg_quality + 0.2 * flag_score
+    final_score = clamp_score(0.4 * coverage + 0.4 * avg_quality + 0.2 * flag_score)
 
     print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
     return final_score
@@ -441,7 +446,7 @@ def run_paper_assembly_task():
     total_reward += obs.reward
     print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
 
-    final_score = obs.final_paper_score if obs.paper_assembled else 0.0
+    final_score = clamp_score(obs.final_paper_score if obs.paper_assembled else 0.01)
     print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
     return final_score
 

@@ -446,6 +446,10 @@ class ExamForgeEnvironment(Environment):
 # Task Grader Functions (referenced from openenv.yaml)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _clamp_score(score: float) -> float:
+    """Clamp a score to strictly within (0, 1) -- never exactly 0.0 or 1.0."""
+    return max(0.01, min(0.99, score))
+
 def question_generation_grader(trajectory: list) -> float:
     """Grade an agent's question generation performance.
     
@@ -457,11 +461,11 @@ def question_generation_grader(trajectory: list) -> float:
     Returns a score from 0.0 to 1.0.
     """
     if not trajectory:
-        return 0.0
+        return 0.01
 
     generated = [s for s in trajectory if s.get("action_type") == "generate_question" and s.get("success", False)]
     if not generated:
-        return 0.0
+        return 0.01
 
     # Score components
     count_score = min(len(generated) / 15.0, 1.0)  # Target 15 questions
@@ -472,7 +476,7 @@ def question_generation_grader(trajectory: list) -> float:
     marks_set = set(s.get("marks", 0) for s in generated)
     marks_score = min(len(marks_set) / 3.0, 1.0)  # Should use 1, 2, and 4
 
-    return 0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score
+    return _clamp_score(0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score)
 
 
 def question_validation_grader(trajectory: list) -> float:
@@ -493,7 +497,7 @@ def question_validation_grader(trajectory: list) -> float:
     flagged = [s for s in trajectory if s.get("action_type") == "flag_question" and s.get("success", False)]
 
     if not generated:
-        return 0.0
+        return 0.01
 
     # Validation coverage
     coverage_score = min(len(validated) / max(len(generated), 1), 1.0)
@@ -505,7 +509,7 @@ def question_validation_grader(trajectory: list) -> float:
     # Flagging accuracy (reward flagging low-quality)
     flag_score = min(len(flagged) * 0.25, 1.0) if flagged else 0.5
 
-    return 0.4 * coverage_score + 0.4 * avg_quality + 0.2 * flag_score
+    return _clamp_score(0.4 * coverage_score + 0.4 * avg_quality + 0.2 * flag_score)
 
 
 def paper_assembly_grader(trajectory: list) -> float:
@@ -520,11 +524,11 @@ def paper_assembly_grader(trajectory: list) -> float:
     Returns a score from 0.0 to 1.0.
     """
     if not trajectory:
-        return 0.0
+        return 0.01
 
     assembly = [s for s in trajectory if s.get("action_type") == "assemble_paper"]
     if not assembly:
-        return 0.0
+        return 0.01
 
     last_assembly = assembly[-1]
     if not last_assembly.get("success", False):
@@ -545,4 +549,4 @@ def paper_assembly_grader(trajectory: list) -> float:
     else:
         balance_score = 0.0
 
-    return 0.4 * paper_score + 0.3 * topic_coverage + 0.3 * balance_score
+    return _clamp_score(0.4 * paper_score + 0.3 * topic_coverage + 0.3 * balance_score)
