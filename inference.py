@@ -235,6 +235,10 @@ def run_demo_episode():
     print(f"Paper constraints: {env.paper_constraints}")
     print("-" * 70)
 
+    task_name = "examforge_demo"
+    print(f"[START] task={task_name}", flush=True)
+    step_counter = 0
+
     generated_ids = []
 
     # Phase 1: Generate and validate all 15 questions
@@ -254,6 +258,8 @@ def run_demo_episode():
             explanation=q["explanation"],
         )
         obs = env.step(action)
+        step_counter += 1
+        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
         total_reward += obs.reward
         qid = obs.question_id_generated
         generated_ids.append(qid)
@@ -265,6 +271,8 @@ def run_demo_episode():
             question_id=qid,
         )
         obs = env.step(val_action)
+        step_counter += 1
+        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
         total_reward += obs.reward
         print(f"  Validated  → score: {obs.validation_score:.2f}, reward: {obs.reward:+.2f}")
 
@@ -281,6 +289,8 @@ def run_demo_episode():
                 flag_reason="Low validation score — question quality below threshold for exam inclusion.",
             )
             obs = env.step(flag_action)
+            step_counter += 1
+            print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
             total_reward += obs.reward
             flagged_count += 1
             print(f"  Flagged Q (score={record.validation_score:.2f}) → reward: {obs.reward:+.2f}")
@@ -293,6 +303,8 @@ def run_demo_episode():
     # Phase 3: Assemble paper
     assemble_action = ExamForgeAction(action_type=ActionType.ASSEMBLE_PAPER)
     obs = env.step(assemble_action)
+    step_counter += 1
+    print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
     total_reward += obs.reward
 
     print()
@@ -310,6 +322,8 @@ def run_demo_episode():
     print("-" * 70)
     print(f"TOTAL ACCUMULATED REWARD: {total_reward:+.2f}")
     print("=" * 70)
+
+    print(f"[END] task={task_name} score={obs.final_paper_score} steps={step_counter}", flush=True)
 
     return total_reward
 
