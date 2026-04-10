@@ -9,3 +9,6 @@ build/
 outputs/
 *.log
 ANTIGRAVITY_PROMPTS.md
+.venv/
+_verify_step1.py
+_final_checklist.py

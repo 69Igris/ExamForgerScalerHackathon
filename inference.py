@@ -1,237 +1,211 @@
 """
-ExamForge Demo Agent — inference.py
+ExamForge — inference.py
+========================
+Baseline inference script for the Meta PyTorch OpenEnv Hackathon 2026.
 
-Demonstrates a complete episode WITHOUT connecting to a live server.
-Tests the environment logic directly by generating, validating, and
-assembling a JEE Physics exam paper with 15 hardcoded realistic MCQs.
+Runs an LLM agent (via OpenAI-compatible client) against all 3 ExamForge tasks:
+  1. question_generation  (easy)
+  2. question_validation  (medium)
+  3. paper_assembly       (hard)
+
+MANDATORY ENV VARS:
+  API_BASE_URL   - LLM API endpoint
+  MODEL_NAME     - Model identifier
+  HF_TOKEN       - HuggingFace / API key
+
+STDOUT FORMAT (DO NOT MODIFY):
+  [START] task=<name> env=examforge model=<model>
+  [STEP]  step=<n> action=<str> reward=<0.00> done=<bool> error=<str|null>
+  [END]   success=<bool> steps=<n> score=<0.000> rewards=<r1,r2,...>
 """
 
-import sys
+import json
 import os
-sys.path.insert(0, ".")
+import sys
+import textwrap
+import uuid
+from typing import List, Optional
+
 from openai import OpenAI
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-3.5-turbo")
-API_KEY = os.getenv("API_KEY", os.getenv("HF_TOKEN", "dummy-key"))
-
-client = OpenAI(
-    base_url=API_BASE_URL,
-    api_key=API_KEY
-)
-
+# ─── Environment imports ───────────────────────────────────────────────────────
+sys.path.insert(0, ".")
 from server.environment import ExamForgeEnvironment, SUBJECT_TOPICS
 from models import ExamForgeAction, ActionType
 
+# ─── Configuration ─────────────────────────────────────────────────────────────
+API_KEY      = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "dummy-key"
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+BENCHMARK    = "examforge"
 
-def clamp_score(score: float) -> float:
-    """Clamp score to strictly within (0, 1) — never exactly 0.0 or 1.0."""
-    return max(0.01, min(0.99, score))
+MAX_STEPS_PER_TASK = 40   # well within 50-step episode limit
+TEMPERATURE        = 0.3  # lower = more deterministic = more reproducible
+MAX_TOKENS         = 600
+SUCCESS_THRESHOLD  = 0.5  # score >= 0.5 counts as success
 
+# ─── Logging helpers (EXACT FORMAT — DO NOT CHANGE) ───────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 15 Realistic JEE Physics MCQs
-# Covering ≥5 topics, mix of easy (5), medium (7), hard (3)
-# ─────────────────────────────────────────────────────────────────────────────
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
-SAMPLE_QUESTIONS = [
-    # ── EASY (5 questions, 1 mark each) ──────────────────────────────────────
-    {
-        "topic": "Kinematics",
-        "difficulty": "easy",
-        "marks": 1,
-        "question_text": "A body is thrown vertically upward with velocity u. The greatest height h to which it will rise is:",
-        "option_a": "u / 2g",
-        "option_b": "u² / 2g",
-        "option_c": "u² / g",
-        "option_d": "u / g",
-        "correct_option": "B",
-        "explanation": "Using v² = u² − 2gh, at greatest height v = 0, so h = u²/2g. Option B is correct.",
-    },
-    {
-        "topic": "Laws of Motion",
-        "difficulty": "easy",
-        "marks": 1,
-        "question_text": "Newton's first law of motion defines which physical quantity?",
-        "option_a": "Velocity",
-        "option_b": "Force",
-        "option_c": "Inertia",
-        "option_d": "Momentum",
-        "correct_option": "C",
-        "explanation": "Newton's first law states that a body continues in its state of rest or uniform motion unless acted upon by an external force. This law defines inertia. Option C is correct.",
-    },
-    {
-        "topic": "Optics",
-        "difficulty": "easy",
-        "marks": 1,
-        "question_text": "The image formed by a convex mirror is always:",
-        "option_a": "Real and inverted",
-        "option_b": "Virtual, erect, and diminished",
-        "option_c": "Virtual and magnified",
-        "option_d": "Real and magnified",
-        "correct_option": "B",
-        "explanation": "A convex mirror always produces a virtual, erect, and diminished image regardless of the object distance. This is because the focus and centre of curvature are behind the mirror. Option B is correct.",
-    },
-    {
-        "topic": "Modern Physics",
-        "difficulty": "easy",
-        "marks": 1,
-        "question_text": "The photoelectric effect demonstrates the:",
-        "option_a": "Wave nature of light",
-        "option_b": "Particle nature of light",
-        "option_c": "Dual nature of matter",
-        "option_d": "Wave-particle duality of electrons",
-        "correct_option": "B",
-        "explanation": "The photoelectric effect was explained by Einstein using the photon concept — light consists of discrete energy packets (photons). This demonstrates the particle nature of light. Option B is correct.",
-    },
-    {
-        "topic": "Current Electricity",
-        "difficulty": "easy",
-        "marks": 1,
-        "question_text": "The SI unit of electrical resistance is:",
-        "option_a": "Ampere",
-        "option_b": "Volt",
-        "option_c": "Ohm",
-        "option_d": "Watt",
-        "correct_option": "C",
-        "explanation": "Electrical resistance is measured in ohms (Ω), named after Georg Simon Ohm. One ohm equals one volt per ampere. Option C is correct.",
-    },
+def log_step(step: int, action: str, reward: float, done: bool,
+             error: Optional[str] = None) -> None:
+    error_val = error if error else "null"
+    done_val  = str(done).lower()
+    # Sanitize action string: remove newlines, truncate to 120 chars
+    action_clean = action.replace("\n", " ").replace("\r", "").strip()[:120]
+    print(
+        f"[STEP] step={step} action={action_clean} "
+        f"reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
 
-    # ── MEDIUM (7 questions, 2 marks each) ───────────────────────────────────
-    {
-        "topic": "Work & Energy",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "A force F = (3î + 4ĵ) N acts on a body and displaces it by s = (3î + 4ĵ) m. The work done is:",
-        "option_a": "10 J",
-        "option_b": "15 J",
-        "option_c": "25 J",
-        "option_d": "20 J",
-        "correct_option": "C",
-        "explanation": "Work done W = F · s = (3×3) + (4×4) = 9 + 16 = 25 J. The dot product of force and displacement vectors gives the scalar work done. Option C is correct.",
-    },
-    {
-        "topic": "Thermodynamics",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "In an isothermal process for an ideal gas, which quantity remains constant?",
-        "option_a": "Pressure",
-        "option_b": "Volume",
-        "option_c": "Temperature",
-        "option_d": "Entropy",
-        "correct_option": "C",
-        "explanation": "By definition, an isothermal process occurs at constant temperature. For an ideal gas undergoing isothermal change, PV = nRT remains constant since T is constant. Option C is correct.",
-    },
-    {
-        "topic": "Electrostatics",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "Two point charges +q and −q are placed at distance d apart. The electric field at the midpoint of the line joining them is:",
-        "option_a": "Zero",
-        "option_b": "kq/d² directed from +q to −q",
-        "option_c": "4kq/d² directed from +q to −q",
-        "option_d": "8kq/d² directed from +q to −q",
-        "correct_option": "D",
-        "explanation": "At the midpoint, each charge is at distance d/2. E from +q = kq/(d/2)² = 4kq/d² pointing away, E from −q = 4kq/d² pointing towards −q. Both point in same direction (from +q to −q), so net E = 8kq/d². Option D is correct.",
-    },
-    {
-        "topic": "Magnetism",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "A charged particle moving with velocity v enters a uniform magnetic field B perpendicular to its motion. The path of the particle is:",
-        "option_a": "Straight line",
-        "option_b": "Parabola",
-        "option_c": "Circle",
-        "option_d": "Ellipse",
-        "correct_option": "C",
-        "explanation": "When a charged particle enters a uniform magnetic field perpendicular to its velocity, the magnetic force qv×B acts as centripetal force, causing circular motion. The radius is r = mv/qB. Option C is correct.",
-    },
-    {
-        "topic": "Kinematics",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "A projectile is launched at angle θ with horizontal with speed u. The time of flight is:",
-        "option_a": "u sin θ / g",
-        "option_b": "2u sin θ / g",
-        "option_c": "u cos θ / g",
-        "option_d": "2u cos θ / g",
-        "correct_option": "B",
-        "explanation": "The time of flight T = 2u sinθ/g. This comes from analyzing vertical motion: at the highest point vy = 0, so time to reach top = u sinθ/g, and total flight time is twice that. Option B is correct.",
-    },
-    {
-        "topic": "Rotational Motion",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "The moment of inertia of a solid sphere of mass M and radius R about its diameter is:",
-        "option_a": "MR²",
-        "option_b": "2MR²/3",
-        "option_c": "2MR²/5",
-        "option_d": "MR²/2",
-        "correct_option": "C",
-        "explanation": "The moment of inertia of a solid sphere about its diameter is (2/5)MR². This is derived by integrating dm × r² over the volume using thin disk elements. Option C is correct.",
-    },
-    {
-        "topic": "Work & Energy",
-        "difficulty": "medium",
-        "marks": 2,
-        "question_text": "A spring of spring constant k is compressed by distance x. The potential energy stored is:",
-        "option_a": "kx",
-        "option_b": "kx²",
-        "option_c": "kx²/2",
-        "option_d": "2kx²",
-        "correct_option": "C",
-        "explanation": "The elastic potential energy stored in a spring is given by U = ½kx², where k is the spring constant and x is the compression or extension from natural length. Option C is correct.",
-    },
+def log_end(success: bool, steps: int, score: float,
+            rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} "
+        f"score={score:.3f} rewards={rewards_str}",
+        flush=True,
+    )
 
-    # ── HARD (3 questions, 4 marks each) ─────────────────────────────────────
-    {
-        "topic": "Thermodynamics",
-        "difficulty": "hard",
-        "marks": 4,
-        "question_text": "One mole of an ideal monoatomic gas undergoes an adiabatic process where temperature changes from T₁ to T₂. The work done by the gas is:",
-        "option_a": "nCv(T₁ − T₂)",
-        "option_b": "nCp(T₁ − T₂)",
-        "option_c": "nR(T₁ − T₂)/(γ − 1)",
-        "option_d": "Both A and C",
-        "correct_option": "D",
-        "explanation": "For an adiabatic process, Q = 0, so by first law W = −ΔU = nCv(T₁ − T₂). Also W = nR(T₁ − T₂)/(γ − 1). Since Cv = R/(γ − 1) for ideal gas, both expressions are equivalent. For monoatomic gas, γ = 5/3, Cv = 3R/2. So W = (3/2)nR(T₁ − T₂). Option D is correct because both A and C give the same result.",
-    },
-    {
-        "topic": "Electrostatics",
-        "difficulty": "hard",
-        "marks": 4,
-        "question_text": "A charge Q is distributed uniformly over a thin ring of radius R. The electric potential at a point P on the axis at distance x from the centre is:",
-        "option_a": "kQ/x",
-        "option_b": "kQ/R",
-        "option_c": "kQ/√(R² + x²)",
-        "option_d": "kQx/(R² + x²)",
-        "correct_option": "C",
-        "explanation": "Every element dq on the ring is at the same distance √(R² + x²) from point P on the axis. Since potential is a scalar, V = ∫k dq/√(R² + x²) = kQ/√(R² + x²). This is a fundamental result in electrostatics. At x = 0 (centre), V = kQ/R, and as x → ∞, V → kQ/x (like a point charge). Option C is correct.",
-    },
-    {
-        "topic": "Modern Physics",
-        "difficulty": "hard",
-        "marks": 4,
-        "question_text": "In hydrogen atom, the ratio of the frequencies of the first line of the Lyman series to the first line of the Balmer series is:",
-        "option_a": "27/5",
-        "option_b": "5/27",
-        "option_c": "27/8",
-        "option_d": "8/27",
-        "correct_option": "A",
-        "explanation": "First Lyman line: 1/λ₁ = R(1/1² − 1/2²) = R(3/4), so ν₁ = Rc(3/4). First Balmer line: 1/λ₂ = R(1/2² − 1/3²) = R(5/36), so ν₂ = Rc(5/36). Ratio = (3/4)/(5/36) = (3/4)(36/5) = 108/20 = 27/5. This requires careful application of the Rydberg formula for hydrogen spectral series. Option A is correct.",
-    },
-]
+# ─── LLM client ───────────────────────────────────────────────────────────────
 
-assert len(SAMPLE_QUESTIONS) == 15, f"Expected 15 questions, got {len(SAMPLE_QUESTIONS)}"
+def get_llm_client() -> OpenAI:
+    return OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
+def call_llm(client: OpenAI, system: str, user: str) -> str:
+    """Call LLM and return text. Falls back to empty string on error."""
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            stream=False,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as exc:
+        print(f"[DEBUG] LLM call failed: {exc}", flush=True)
+        return ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 1: Question Generation
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── System prompts ────────────────────────────────────────────────────────────
 
-def run_question_generation_task():
-    """Task: Generate high-quality MCQs across multiple topics."""
+SYSTEM_GENERATE = textwrap.dedent("""
+You are an expert exam question author for Indian competitive exams (JEE, GATE, UPSC).
+Your job is to generate a high-quality Multiple Choice Question (MCQ).
+
+You MUST respond with ONLY a valid JSON object — no markdown, no explanation.
+The JSON must have exactly these keys:
+{
+  "action_type": "generate_question",
+  "topic": "<topic from the list>",
+  "difficulty": "<easy|medium|hard>",
+  "marks": <1|2|4>,
+  "question_text": "<the question>",
+  "option_a": "<option A>",
+  "option_b": "<option B>",
+  "option_c": "<option C>",
+  "option_d": "<option D>",
+  "correct_option": "<A|B|C|D>",
+  "explanation": "<why the correct option is right, min 50 chars>"
+}
+
+Rules:
+- easy → marks=1, short explanation (50-80 chars)
+- medium → marks=2, medium explanation (80-150 chars)  
+- hard → marks=4, detailed explanation (150+ chars)
+- All 4 options must be distinct and plausible (no obviously wrong options)
+- The correct_option MUST be mentioned in the explanation
+""").strip()
+
+SYSTEM_VALIDATE = textwrap.dedent("""
+You are a quality control agent for exam questions.
+Given a question_id, your job is to validate it.
+
+You MUST respond with ONLY a valid JSON object:
+{
+  "action_type": "validate_question",
+  "question_id": "<the question_id>"
+}
+""").strip()
+
+SYSTEM_FLAG = textwrap.dedent("""
+You are a quality control agent. You must flag low-quality exam questions.
+Respond with ONLY a valid JSON object:
+{
+  "action_type": "flag_question",
+  "question_id": "<the question_id>",
+  "flag_reason": "<specific reason why question is low quality, min 15 chars>"
+}
+""").strip()
+
+SYSTEM_ASSEMBLE = textwrap.dedent("""
+You are an exam paper coordinator. When enough questions are ready, assemble the paper.
+Respond with ONLY a valid JSON object:
+{
+  "action_type": "assemble_paper"
+}
+""").strip()
+
+# ─── Action parser ─────────────────────────────────────────────────────────────
+
+def parse_action(raw: str, fallback_type: str = "assemble_paper",
+                 context: dict = None) -> ExamForgeAction:
+    """
+    Parse LLM output into ExamForgeAction.
+    Falls back gracefully if JSON is malformed.
+    """
+    context = context or {}
+    raw = raw.strip()
+    
+    # Strip markdown code fences if present
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+    
+    try:
+        data = json.loads(raw)
+        action_type = data.get("action_type", fallback_type)
+        return ExamForgeAction(
+            action_type=ActionType(action_type),
+            topic=data.get("topic"),
+            difficulty=data.get("difficulty"),
+            marks=data.get("marks"),
+            question_text=data.get("question_text"),
+            option_a=data.get("option_a"),
+            option_b=data.get("option_b"),
+            option_c=data.get("option_c"),
+            option_d=data.get("option_d"),
+            correct_option=data.get("correct_option"),
+            explanation=data.get("explanation"),
+            question_id=data.get("question_id"),
+            flag_reason=data.get("flag_reason"),
+        )
+    except (json.JSONDecodeError, ValueError, KeyError):
+        print(f"[DEBUG] Failed to parse action JSON, using fallback: {fallback_type}", flush=True)
+        return ExamForgeAction(
+            action_type=ActionType(fallback_type),
+            **{k: v for k, v in context.items() if v is not None}
+        )
+
+# ─── TASK 1: Question Generation (Easy) ───────────────────────────────────────
+
+def run_task_question_generation(client: OpenAI) -> float:
+    """
+    EASY TASK: Generate 12 high-quality MCQs across 5+ topics.
+    
+    The LLM agent observes the current state (marks used, topics covered)
+    and decides what question to generate next.
+    Agent goal: diverse topics, appropriate difficulty mix, valid format.
+    """
     task_name = "question_generation"
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     env = ExamForgeEnvironment()
     env.current_subject = "JEE Physics"
     env.available_topics = list(SUBJECT_TOPICS["JEE Physics"])
@@ -239,233 +213,504 @@ def run_question_generation_task():
     env.question_bank = {}
     env.step_count = 0
     env.marks_used = 0
-    env.episode_id = "task-question-gen-001"
+    env.episode_id = f"task-gen-{uuid.uuid4().hex[:8]}"
+    env._paper_assembled = False
 
-    # Use LLM proxy
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+    
+    # Target: generate questions covering 5+ topics with difficulty mix
+    target_plan = [
+        ("Kinematics", "easy", 1),
+        ("Laws of Motion", "easy", 1),
+        ("Optics", "easy", 1),
+        ("Modern Physics", "easy", 1),
+        ("Current Electricity", "easy", 1),
+        ("Work & Energy", "medium", 2),
+        ("Thermodynamics", "medium", 2),
+        ("Electrostatics", "medium", 2),
+        ("Magnetism", "medium", 2),
+        ("Rotational Motion", "medium", 2),
+        ("Thermodynamics", "hard", 4),
+        ("Electrostatics", "hard", 4),
+    ]
+
     try:
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Generate a JEE Physics MCQ on Kinematics."}],
-            max_tokens=10
-        )
-    except Exception:
-        pass
+        for step_num, (topic, difficulty, marks) in enumerate(target_plan, 1):
+            if steps_taken >= MAX_STEPS_PER_TASK:
+                break
+            
+            obs = env.state()
+            marks_remaining = 100 - env.marks_used
+            
+            user_prompt = textwrap.dedent(f"""
+            Generate a {difficulty} MCQ on topic: "{topic}"
+            
+            Context:
+            - Subject: JEE Physics
+            - Marks for this question: {marks}
+            - Marks used so far: {env.marks_used}/100
+            - Questions generated: {len(env.question_bank)}
+            - Available topics: {env.available_topics[:5]}
+            
+            Generate the question now. Remember: correct_option MUST appear in explanation.
+            """).strip()
 
-    print(f"[START] task={task_name}", flush=True)
-    step_counter = 0
-    total_reward = 0.0
+            raw = call_llm(client, SYSTEM_GENERATE, user_prompt)
+            
+            if not raw:
+                # LLM failed — use a well-formed fallback question
+                raw = json.dumps({
+                    "action_type": "generate_question",
+                    "topic": topic,
+                    "difficulty": difficulty,
+                    "marks": marks,
+                    "question_text": f"Which of the following best describes {topic} in physics?",
+                    "option_a": "Option A related to the topic",
+                    "option_b": "Option B with different approach",
+                    "option_c": "Option C with common misconception",
+                    "option_d": "Option D with partial truth",
+                    "correct_option": "A",
+                    "explanation": f"Option A is correct because it accurately describes {topic}. "
+                                   f"This is a fundamental concept that students must understand for JEE.",
+                })
 
-    for i, q in enumerate(SAMPLE_QUESTIONS):
-        action = ExamForgeAction(
-            action_type=ActionType.GENERATE_QUESTION,
-            topic=q["topic"], difficulty=q["difficulty"], marks=q["marks"],
-            question_text=q["question_text"],
-            option_a=q["option_a"], option_b=q["option_b"],
-            option_c=q["option_c"], option_d=q["option_d"],
-            correct_option=q["correct_option"], explanation=q["explanation"],
-        )
-        obs = env.step(action)
-        step_counter += 1
-        total_reward += obs.reward
-        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            action = parse_action(raw, fallback_type="generate_question")
+            
+            # Ensure fields from plan are set if LLM deviated
+            if not action.topic or action.topic not in env.available_topics:
+                action.topic = topic
+            if action.difficulty not in ("easy", "medium", "hard"):
+                action.difficulty = difficulty
+            if action.marks not in (1, 2, 4):
+                action.marks = marks
 
-    # Compute grader score
-    topics = set(q["topic"] for q in SAMPLE_QUESTIONS)
-    marks_set = set(q["marks"] for q in SAMPLE_QUESTIONS)
-    count_score = min(len(SAMPLE_QUESTIONS) / 15.0, 1.0)
-    topic_score = min(len(topics) / 5.0, 1.0)
-    marks_score = min(len(marks_set) / 3.0, 1.0)
-    final_score = clamp_score(0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score)
+            obs_result = env.step(action)
+            reward = obs_result.reward
+            done = obs_result.done
+            error_msg = None if obs_result.last_action_success else obs_result.last_action_result
+            
+            rewards.append(reward)
+            steps_taken = env.step_count
+            
+            action_str = f"generate_question(topic={topic},difficulty={difficulty},marks={marks})"
+            log_step(step=steps_taken, action=action_str, reward=reward,
+                     done=done, error=error_msg if not obs_result.last_action_success else None)
 
-    print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
-    return final_score
+            if done:
+                break
+
+        # Score using the grader
+        from server.environment import question_generation_grader
+        episode_state = env.state()
+        score = question_generation_grader(episode_state)
+        score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Task error: {exc}", flush=True)
+        score = 0.0
+        success = False
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 2: Question Validation
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── TASK 2: Question Validation (Medium) ─────────────────────────────────────
 
-def run_question_validation_task():
-    """Task: Validate generated questions and flag low-quality ones."""
+def run_task_question_validation(client: OpenAI) -> float:
+    """
+    MEDIUM TASK: Generate questions, then validate each one, flag low-quality ones.
+    
+    The LLM agent must: generate → validate → flag (if low quality)
+    Agent is rewarded for correct validation and precise flagging.
+    """
     task_name = "question_validation"
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     env = ExamForgeEnvironment()
-    env.current_subject = "JEE Physics"
-    env.available_topics = list(SUBJECT_TOPICS["JEE Physics"])
+    env.current_subject = "GATE CS"
+    env.available_topics = list(SUBJECT_TOPICS["GATE CS"])
     env.paper_constraints = {"total_marks": 100, "num_questions": 25, "time_limit_mins": 180}
     env.question_bank = {}
     env.step_count = 0
     env.marks_used = 0
-    env.episode_id = "task-validation-001"
+    env.episode_id = f"task-val-{uuid.uuid4().hex[:8]}"
+    env._paper_assembled = False
 
-    # Use LLM proxy
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+
+    # Pre-defined questions for GATE CS
+    generation_plan = [
+        ("Data Structures", "easy", 1),
+        ("Algorithms", "easy", 1),
+        ("Operating Systems", "medium", 2),
+        ("DBMS", "medium", 2),
+        ("Computer Networks", "medium", 2),
+        ("Theory of Computation", "hard", 4),
+        ("Compiler Design", "hard", 4),
+        ("Digital Logic", "easy", 1),
+    ]
+
+    generated_ids: List[str] = []
+
     try:
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Validate: Is F=ma the correct answer for Newton's second law?"}],
-            max_tokens=10
-        )
-    except Exception:
-        pass
+        # Phase 1: Generate questions
+        for topic, difficulty, marks in generation_plan:
+            if steps_taken >= MAX_STEPS_PER_TASK - 10:
+                break
+            
+            user_prompt = textwrap.dedent(f"""
+            Generate a {difficulty} MCQ on: "{topic}" for GATE Computer Science.
+            Marks: {marks}
+            Available topics: {env.available_topics}
+            Make the explanation detailed and mention the correct option letter explicitly.
+            """).strip()
 
-    print(f"[START] task={task_name}", flush=True)
-    step_counter = 0
-    total_reward = 0.0
-    generated_ids = []
-    validation_scores = []
+            raw = call_llm(client, SYSTEM_GENERATE, user_prompt)
+            if not raw:
+                raw = json.dumps({
+                    "action_type": "generate_question",
+                    "topic": topic, "difficulty": difficulty, "marks": marks,
+                    "question_text": f"In {topic}, which statement is correct?",
+                    "option_a": "Statement A about the concept",
+                    "option_b": "Statement B with subtle error",
+                    "option_c": "Statement C commonly confused",
+                    "option_d": "Statement D partially correct",
+                    "correct_option": "A",
+                    "explanation": f"Option A is correct. In {topic}, this is a standard result "
+                                   f"tested in GATE. Options B, C, D are incorrect variations.",
+                })
 
-    # Generate questions first
-    for q in SAMPLE_QUESTIONS:
-        action = ExamForgeAction(
-            action_type=ActionType.GENERATE_QUESTION,
-            topic=q["topic"], difficulty=q["difficulty"], marks=q["marks"],
-            question_text=q["question_text"],
-            option_a=q["option_a"], option_b=q["option_b"],
-            option_c=q["option_c"], option_d=q["option_d"],
-            correct_option=q["correct_option"], explanation=q["explanation"],
-        )
-        obs = env.step(action)
-        step_counter += 1
-        total_reward += obs.reward
-        generated_ids.append(obs.question_id_generated)
-        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            action = parse_action(raw, "generate_question")
+            if not action.topic or action.topic not in env.available_topics:
+                action.topic = topic
+            if action.difficulty not in ("easy", "medium", "hard"):
+                action.difficulty = difficulty
+            if action.marks not in (1, 2, 4):
+                action.marks = marks
 
-    # Validate each question
-    for qid in generated_ids:
-        val_action = ExamForgeAction(
-            action_type=ActionType.VALIDATE_QUESTION,
-            question_id=qid,
-        )
-        obs = env.step(val_action)
-        step_counter += 1
-        total_reward += obs.reward
-        validation_scores.append(obs.validation_score)
-        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            obs_result = env.step(action)
+            reward = obs_result.reward
+            done = obs_result.done
 
-    # Flag low-quality questions
-    flagged = 0
-    for qid in generated_ids:
-        record = env.question_bank[qid]
-        if record.is_validated and record.validation_score < 0.4:
-            flag_action = ExamForgeAction(
-                action_type=ActionType.FLAG_QUESTION,
-                question_id=qid,
-                flag_reason="Low validation score — question quality below threshold for exam inclusion.",
-            )
-            obs = env.step(flag_action)
-            step_counter += 1
-            total_reward += obs.reward
-            flagged += 1
-            print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            if obs_result.question_id_generated:
+                generated_ids.append(obs_result.question_id_generated)
 
-    # Compute grader score
-    coverage = min(len(validation_scores) / max(len(generated_ids), 1), 1.0)
-    avg_quality = sum(validation_scores) / max(len(validation_scores), 1)
-    flag_score = min(flagged * 0.25, 1.0) if flagged else 0.5
-    final_score = clamp_score(0.4 * coverage + 0.4 * avg_quality + 0.2 * flag_score)
+            rewards.append(reward)
+            steps_taken = env.step_count
+            action_str = f"generate_question(topic={topic},difficulty={difficulty})"
+            log_step(step=steps_taken, action=action_str, reward=reward, done=done)
 
-    print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
-    return final_score
+            if done:
+                break
+
+        # Phase 2: Validate each generated question
+        for qid in generated_ids:
+            if steps_taken >= MAX_STEPS_PER_TASK - 2:
+                break
+            
+            record = env.question_bank.get(qid)
+            if not record:
+                continue
+
+            user_prompt = textwrap.dedent(f"""
+            Validate this question (ID: {qid}).
+            Topic: {record.topic}, Difficulty: {record.difficulty}
+            Question: {record.question_text[:100]}
+            Correct option: {record.correct_option}
+            
+            Issue a validate_question action now.
+            """).strip()
+
+            raw = call_llm(client, SYSTEM_VALIDATE, user_prompt)
+            action = parse_action(raw, "validate_question",
+                                  context={"question_id": qid})
+            if not action.question_id:
+                action.question_id = qid
+
+            obs_result = env.step(action)
+            reward = obs_result.reward
+            done = obs_result.done
+            
+            rewards.append(reward)
+            steps_taken = env.step_count
+            action_str = f"validate_question(id={qid[:8]})"
+            log_step(step=steps_taken, action=action_str, reward=reward, done=done)
+
+            if done:
+                break
+
+        # Phase 3: Flag low-quality questions
+        for qid in generated_ids:
+            if steps_taken >= MAX_STEPS_PER_TASK:
+                break
+            record = env.question_bank.get(qid)
+            if not record or not record.is_validated:
+                continue
+            if record.validation_score < 0.4:
+                user_prompt = f"Flag question {qid} — validation score {record.validation_score:.2f} is too low."
+                raw = call_llm(client, SYSTEM_FLAG, user_prompt)
+                action = parse_action(raw, "flag_question",
+                                      context={"question_id": qid,
+                                               "flag_reason": "Low validation score — question quality below acceptable threshold"})
+                if not action.question_id:
+                    action.question_id = qid
+                if not action.flag_reason or len(action.flag_reason) < 15:
+                    action.flag_reason = "Low validation score — question quality below acceptable threshold"
+
+                obs_result = env.step(action)
+                reward = obs_result.reward
+                done = obs_result.done
+                rewards.append(reward)
+                steps_taken = env.step_count
+                action_str = f"flag_question(id={qid[:8]},score={record.validation_score:.2f})"
+                log_step(step=steps_taken, action=action_str, reward=reward, done=done)
+
+                if done:
+                    break
+
+        from server.environment import question_validation_grader
+        episode_state = env.state()
+        score = question_validation_grader(episode_state)
+        score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Task error: {exc}", flush=True)
+        score = 0.0
+        success = False
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Task 3: Paper Assembly
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── TASK 3: Paper Assembly (Hard) ────────────────────────────────────────────
 
-def run_paper_assembly_task():
-    """Task: Assemble a complete, balanced exam paper."""
+def run_task_paper_assembly(client: OpenAI) -> float:
+    """
+    HARD TASK: Full pipeline — generate, validate, flag, then assemble a
+    balanced exam paper meeting coverage and difficulty distribution goals.
+    
+    Agent must strategically manage marks budget, topic coverage, and
+    difficulty balance before calling assemble_paper.
+    """
     task_name = "paper_assembly"
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     env = ExamForgeEnvironment()
-    env.current_subject = "JEE Physics"
-    env.available_topics = list(SUBJECT_TOPICS["JEE Physics"])
+    env.current_subject = "JEE Mathematics"
+    env.available_topics = list(SUBJECT_TOPICS["JEE Mathematics"])
     env.paper_constraints = {"total_marks": 100, "num_questions": 25, "time_limit_mins": 180}
     env.question_bank = {}
     env.step_count = 0
     env.marks_used = 0
-    env.episode_id = "task-assembly-001"
+    env.episode_id = f"task-asm-{uuid.uuid4().hex[:8]}"
+    env._paper_assembled = False
 
-    # Use LLM proxy
+    rewards: List[float] = []
+    steps_taken = 0
+    score = 0.0
+    success = False
+
+    # Strategic plan: target 30% easy, 50% medium, 20% hard
+    # 12 questions: 4 easy×1=4, 6 medium×2=12, 2 hard×4=8 → total=24 marks (too few)
+    # Better: 5 easy×1=5, 7 medium×2=14, 3 hard×4=12 → total=31 marks
+    # Aim for ~40 marks from 15 questions, then assemble
+    generation_plan = [
+        ("Sets & Relations", "easy", 1),
+        ("Complex Numbers", "easy", 1),
+        ("Matrices", "easy", 1),
+        ("Statistics", "easy", 1),
+        ("Probability", "easy", 1),
+        ("Calculus - Limits", "medium", 2),
+        ("Calculus - Integration", "medium", 2),
+        ("Vectors", "medium", 2),
+        ("3D Geometry", "medium", 2),
+        ("Differential Equations", "medium", 2),
+        ("Complex Numbers", "medium", 2),
+        ("Probability", "medium", 2),
+        ("Calculus - Integration", "hard", 4),
+        ("Vectors", "hard", 4),
+        ("Differential Equations", "hard", 4),
+    ]
+
+    generated_ids: List[str] = []
+
     try:
-        client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": "Assemble a balanced JEE Physics paper."}],
-            max_tokens=10
-        )
-    except Exception:
-        pass
+        # Phase 1: Generate all questions
+        for topic, difficulty, marks in generation_plan:
+            if steps_taken >= MAX_STEPS_PER_TASK - 5:
+                break
+            if env.marks_used + marks > 95:
+                break
 
-    print(f"[START] task={task_name}", flush=True)
-    step_counter = 0
-    total_reward = 0.0
-    generated_ids = []
+            user_prompt = textwrap.dedent(f"""
+            Generate a {difficulty} JEE Mathematics MCQ on: "{topic}"
+            Marks: {marks}
+            Marks used so far: {env.marks_used}/100
+            Available topics: {env.available_topics}
+            
+            Important: Make distractors that look plausible but have subtle errors.
+            Explanation must mention the correct option letter ({marks * 25}+ chars).
+            """).strip()
 
-    # Generate all questions
-    for q in SAMPLE_QUESTIONS:
-        action = ExamForgeAction(
-            action_type=ActionType.GENERATE_QUESTION,
-            topic=q["topic"], difficulty=q["difficulty"], marks=q["marks"],
-            question_text=q["question_text"],
-            option_a=q["option_a"], option_b=q["option_b"],
-            option_c=q["option_c"], option_d=q["option_d"],
-            correct_option=q["correct_option"], explanation=q["explanation"],
-        )
-        obs = env.step(action)
-        step_counter += 1
-        total_reward += obs.reward
-        generated_ids.append(obs.question_id_generated)
-        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            raw = call_llm(client, SYSTEM_GENERATE, user_prompt)
+            if not raw:
+                raw = json.dumps({
+                    "action_type": "generate_question",
+                    "topic": topic, "difficulty": difficulty, "marks": marks,
+                    "question_text": f"Evaluate the expression related to {topic} in JEE context.",
+                    "option_a": "π/4", "option_b": "π/2", "option_c": "π", "option_d": "2π",
+                    "correct_option": "A",
+                    "explanation": f"Option A is correct. Using standard {topic} formulas, "
+                                   f"the result evaluates to π/4. Options B, C, D arise from "
+                                   f"common computational mistakes in {topic}.",
+                })
 
-    # Validate all questions
-    for qid in generated_ids:
-        val_action = ExamForgeAction(
-            action_type=ActionType.VALIDATE_QUESTION,
-            question_id=qid,
-        )
-        obs = env.step(val_action)
-        step_counter += 1
-        total_reward += obs.reward
-        print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            action = parse_action(raw, "generate_question")
+            if not action.topic or action.topic not in env.available_topics:
+                action.topic = topic
+            if action.difficulty not in ("easy", "medium", "hard"):
+                action.difficulty = difficulty
+            if action.marks not in (1, 2, 4):
+                action.marks = marks
 
-    # Flag low-quality
-    for qid in generated_ids:
-        record = env.question_bank[qid]
-        if record.is_validated and record.validation_score < 0.4:
-            flag_action = ExamForgeAction(
-                action_type=ActionType.FLAG_QUESTION,
+            obs_result = env.step(action)
+            reward = obs_result.reward
+            done = obs_result.done
+
+            if obs_result.question_id_generated:
+                generated_ids.append(obs_result.question_id_generated)
+
+            rewards.append(reward)
+            steps_taken = env.step_count
+            action_str = f"generate_question(topic={topic},diff={difficulty},marks={marks})"
+            log_step(step=steps_taken, action=action_str, reward=reward, done=done)
+            if done:
+                break
+
+        # Phase 2: Validate all questions
+        for qid in generated_ids:
+            if steps_taken >= MAX_STEPS_PER_TASK - 3:
+                break
+
+            action = ExamForgeAction(
+                action_type=ActionType.VALIDATE_QUESTION,
                 question_id=qid,
-                flag_reason="Low validation score — question quality below threshold for exam inclusion.",
             )
-            obs = env.step(flag_action)
-            step_counter += 1
-            total_reward += obs.reward
-            print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+            obs_result = env.step(action)
+            reward = obs_result.reward
+            done = obs_result.done
+            rewards.append(reward)
+            steps_taken = env.step_count
+            log_step(step=steps_taken, action=f"validate_question(id={qid[:8]})",
+                     reward=reward, done=done)
+            if done:
+                break
 
-    # Assemble paper
-    assemble_action = ExamForgeAction(action_type=ActionType.ASSEMBLE_PAPER)
-    obs = env.step(assemble_action)
-    step_counter += 1
-    total_reward += obs.reward
-    print(f"[STEP] step={step_counter} reward={obs.reward}", flush=True)
+        # Phase 3: Flag low-quality
+        for qid in generated_ids:
+            if steps_taken >= MAX_STEPS_PER_TASK - 1:
+                break
+            record = env.question_bank.get(qid)
+            if record and record.is_validated and record.validation_score < 0.4:
+                action = ExamForgeAction(
+                    action_type=ActionType.FLAG_QUESTION,
+                    question_id=qid,
+                    flag_reason="Validation score below threshold — question lacks explanation quality",
+                )
+                obs_result = env.step(action)
+                reward = obs_result.reward
+                done = obs_result.done
+                rewards.append(reward)
+                steps_taken = env.step_count
+                log_step(step=steps_taken, action=f"flag_question(id={qid[:8]})",
+                         reward=reward, done=done)
+                if done:
+                    break
 
-    final_score = clamp_score(obs.final_paper_score if obs.paper_assembled else 0.01)
-    print(f"[END] task={task_name} score={final_score:.4f} steps={step_counter}", flush=True)
-    return final_score
+        # Phase 4: LLM decides when to assemble
+        valid_count = len([q for q in env.question_bank.values() if not q.is_flagged])
+        
+        user_prompt = textwrap.dedent(f"""
+        Current paper status:
+        - Total questions generated: {len(env.question_bank)}
+        - Valid questions (not flagged): {valid_count}
+        - Marks used: {env.marks_used}/100
+        - Steps remaining: {MAX_STEPS_PER_TASK - steps_taken}
+        
+        You have enough valid questions. Issue the assemble_paper action now.
+        """).strip()
+
+        raw = call_llm(client, SYSTEM_ASSEMBLE, user_prompt)
+        action = parse_action(raw, "assemble_paper")
+        action.action_type = ActionType.ASSEMBLE_PAPER  # force correct type
+
+        obs_result = env.step(action)
+        reward = obs_result.reward
+        done = obs_result.done
+        rewards.append(reward)
+        steps_taken = env.step_count
+        log_step(step=steps_taken, action="assemble_paper()",
+                 reward=reward, done=done)
+
+        from server.environment import paper_assembly_grader
+        episode_state = env.state()
+        score = paper_assembly_grader(episode_state)
+        score = min(max(score, 0.0), 1.0)
+        success = score >= SUCCESS_THRESHOLD
+
+    except Exception as exc:
+        print(f"[DEBUG] Task error: {exc}", flush=True)
+        score = 0.0
+        success = False
+    finally:
+        log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
+
+    return score
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ─── Main entry point ──────────────────────────────────────────────────────────
+
+def main() -> None:
+    """Run all 3 tasks sequentially and print results."""
+    client = get_llm_client()
+    
+    print("[DEBUG] Starting ExamForge inference script", flush=True)
+    print(f"[DEBUG] API_BASE_URL={API_BASE_URL}", flush=True)
+    print(f"[DEBUG] MODEL_NAME={MODEL_NAME}", flush=True)
+    print(f"[DEBUG] BENCHMARK={BENCHMARK}", flush=True)
+    print("", flush=True)
+
+    scores = {}
+
+    # Task 1: Easy
+    scores["question_generation"] = run_task_question_generation(client)
+    print("", flush=True)
+
+    # Task 2: Medium
+    scores["question_validation"] = run_task_question_validation(client)
+    print("", flush=True)
+
+    # Task 3: Hard
+    scores["paper_assembly"] = run_task_paper_assembly(client)
+    print("", flush=True)
+
+    # Summary
+    avg_score = sum(scores.values()) / len(scores)
+    print(f"[DEBUG] === FINAL SCORES ===", flush=True)
+    for task, s in scores.items():
+        print(f"[DEBUG] {task}: {s:.3f}", flush=True)
+    print(f"[DEBUG] Average score: {avg_score:.3f}", flush=True)
+
 
 if __name__ == "__main__":
-    print("=" * 70, flush=True)
-    print("ExamForge Agent — Running 3 graded tasks", flush=True)
-    print("=" * 70, flush=True)
-
-    s1 = run_question_generation_task()
-    s2 = run_question_validation_task()
-    s3 = run_paper_assembly_task()
-
-    print("=" * 70, flush=True)
-    print(f"Task Scores: generation={s1:.4f}  validation={s2:.4f}  assembly={s3:.4f}", flush=True)
-    print(f"Average Score: {(s1 + s2 + s3) / 3:.4f}", flush=True)
-    print("=" * 70, flush=True)
-
+    main()

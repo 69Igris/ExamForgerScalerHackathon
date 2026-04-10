@@ -71,15 +71,140 @@ class QuestionRecord:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ExamForge State
+# Task Grader Functions (referenced from openenv.yaml)
+# These are standalone module-level functions, NOT class methods.
+# Signature: grader(episode_state: dict) -> float in [0.0, 1.0]
 # ─────────────────────────────────────────────────────────────────────────────
 
-class ExamForgeState(State):
-    """State metadata for the ExamForge environment."""
-    subject: str = ""
-    marks_used: int = 0
-    num_questions_in_bank: int = 0
-    num_valid_questions: int = 0
+def question_generation_grader(episode_state: dict) -> float:
+    """
+    Grader for the question_generation task.
+
+    Scores based on:
+    - Count of questions generated (max 15 expected)
+    - Topic diversity across generated questions
+    - Marks variety (1, 2, 4 mark questions present)
+
+    Returns float in [0.0, 1.0]
+    """
+    question_bank = episode_state.get("question_bank", {})
+    if not question_bank:
+        return 0.0
+
+    questions = list(question_bank.values())
+    total = len(questions)
+
+    # Score 1: Question count (target = 15, max score at 15+)
+    count_score = min(total / 15.0, 1.0)
+
+    # Score 2: Topic diversity (at least 5 different topics)
+    unique_topics = len(set(q.topic for q in questions))
+    topic_score = min(unique_topics / 5.0, 1.0)
+
+    # Score 3: Marks variety (should have easy=1, medium=2, hard=4)
+    unique_marks = len(set(q.marks for q in questions))
+    marks_score = min(unique_marks / 3.0, 1.0)
+
+    final = 0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score
+    return round(min(max(final, 0.0), 1.0), 4)
+
+
+def question_validation_grader(episode_state: dict) -> float:
+    """
+    Grader for the question_validation task.
+
+    Scores based on:
+    - Ratio of validated questions to total
+    - Average validation score across validated questions
+    - Correct flagging of low-quality questions
+
+    Returns float in [0.0, 1.0]
+    """
+    question_bank = episode_state.get("question_bank", {})
+    if not question_bank:
+        return 0.0
+
+    questions = list(question_bank.values())
+    total = len(questions)
+
+    validated = [q for q in questions if q.is_validated]
+    flagged = [q for q in questions if q.is_flagged]
+
+    # Score 1: Validation coverage
+    validation_ratio = len(validated) / total if total > 0 else 0.0
+
+    # Score 2: Average quality of validated questions
+    if validated:
+        avg_score = sum(q.validation_score for q in validated) / len(validated)
+    else:
+        avg_score = 0.0
+
+    # Score 3: Correct flagging (flagged low-quality = good)
+    correctly_flagged = sum(
+        1 for q in flagged
+        if q.is_validated and q.validation_score < 0.4
+    )
+    flagging_score = min(correctly_flagged / max(len(flagged), 1), 1.0) if flagged else 0.5
+
+    final = 0.4 * validation_ratio + 0.4 * avg_score + 0.2 * flagging_score
+    return round(min(max(final, 0.0), 1.0), 4)
+
+
+def paper_assembly_grader(episode_state: dict) -> float:
+    """
+    Grader for the paper_assembly task.
+
+    Scores based on:
+    - Whether paper was assembled (done=True via assemble_paper)
+    - Topic coverage score
+    - Difficulty distribution score
+    - Validation ratio of assembled questions
+
+    Returns float in [0.0, 1.0]
+    """
+    question_bank = episode_state.get("question_bank", {})
+    paper_assembled = episode_state.get("paper_assembled", False)
+
+    if not question_bank:
+        return 0.0
+
+    questions = list(question_bank.values())
+    valid_questions = [q for q in questions if not q.is_flagged]
+
+    if not valid_questions:
+        return 0.0
+
+    # Score 1: Assembly completion bonus
+    assembly_bonus = 0.3 if paper_assembled else 0.0
+
+    # Score 2: Topic coverage
+    unique_topics = len(set(q.topic for q in valid_questions))
+    topic_coverage = min(unique_topics / 5.0, 1.0)
+
+    # Score 3: Difficulty balance (ideal: 30% easy, 50% medium, 20% hard)
+    total_valid = len(valid_questions)
+    easy_ratio = sum(1 for q in valid_questions if q.difficulty == "easy") / total_valid
+    medium_ratio = sum(1 for q in valid_questions if q.difficulty == "medium") / total_valid
+    hard_ratio = sum(1 for q in valid_questions if q.difficulty == "hard") / total_valid
+
+    diff_score = 1.0 - (
+        abs(easy_ratio - 0.30) +
+        abs(medium_ratio - 0.50) +
+        abs(hard_ratio - 0.20)
+    ) / 2.0
+    diff_score = max(0.0, diff_score)
+
+    # Score 4: Validation ratio
+    validated_count = sum(1 for q in valid_questions if q.is_validated)
+    validation_ratio = validated_count / total_valid
+
+    final = (
+        assembly_bonus +
+        0.3 * topic_coverage +
+        0.25 * diff_score +
+        0.15 * validation_ratio
+    )
+    return round(min(max(final, 0.0), 1.0), 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +310,7 @@ class ExamForgeEnvironment(Environment):
         self.step_count = 0
         self.marks_used = 0
         self.episode_id = episode_id or str(uuid.uuid4())
+        self._paper_assembled = False
 
         return self._build_observation(
             reward=0.0,
@@ -414,6 +540,7 @@ class ExamForgeEnvironment(Environment):
             + 0.2 * validated_ratio
         )
         reward = final_paper_score * 3.0
+        self._paper_assembled = True
 
         return self._build_observation(
             reward=reward,
@@ -426,127 +553,20 @@ class ExamForgeEnvironment(Environment):
             final_paper_score=final_paper_score,
         )
 
-    # ── state property ───────────────────────────────────────────────────────
+    # ── state ─────────────────────────────────────────────────────────────────
 
-    @property
-    def state(self) -> ExamForgeState:
-        """Return current environment state metadata."""
-        valid_qs = [q for q in self.question_bank.values() if not q.is_flagged]
-        return ExamForgeState(
-            episode_id=self.episode_id,
-            step_count=self.step_count,
-            subject=self.current_subject,
-            marks_used=self.marks_used,
-            num_questions_in_bank=len(self.question_bank),
-            num_valid_questions=len(valid_qs),
-        )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Task Grader Functions (referenced from openenv.yaml)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _clamp_score(score: float) -> float:
-    """Clamp a score to strictly within (0, 1) -- never exactly 0.0 or 1.0."""
-    return max(0.01, min(0.99, score))
-
-def question_generation_grader(trajectory: list) -> float:
-    """Grade an agent's question generation performance.
-    
-    Evaluates:
-    - Number of well-formed questions generated
-    - Topic diversity across generated questions
-    - Marks distribution quality
-    
-    Returns a score from 0.0 to 1.0.
-    """
-    if not trajectory:
-        return 0.01
-
-    generated = [s for s in trajectory if s.get("action_type") == "generate_question" and s.get("success", False)]
-    if not generated:
-        return 0.01
-
-    # Score components
-    count_score = min(len(generated) / 15.0, 1.0)  # Target 15 questions
-    topics = set(s.get("topic", "") for s in generated)
-    topic_score = min(len(topics) / 5.0, 1.0)  # Target 5+ unique topics
-    
-    # Marks diversity
-    marks_set = set(s.get("marks", 0) for s in generated)
-    marks_score = min(len(marks_set) / 3.0, 1.0)  # Should use 1, 2, and 4
-
-    return _clamp_score(0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score)
-
-
-def question_validation_grader(trajectory: list) -> float:
-    """Grade an agent's question validation performance.
-    
-    Evaluates:
-    - Proportion of generated questions that were validated
-    - Average validation score achieved
-    - Correct flagging of low-quality questions
-    
-    Returns a score from 0.0 to 1.0.
-    """
-    if not trajectory:
-        return 0.0
-    
-    generated = [s for s in trajectory if s.get("action_type") == "generate_question" and s.get("success", False)]
-    validated = [s for s in trajectory if s.get("action_type") == "validate_question" and s.get("success", False)]
-    flagged = [s for s in trajectory if s.get("action_type") == "flag_question" and s.get("success", False)]
-
-    if not generated:
-        return 0.01
-
-    # Validation coverage
-    coverage_score = min(len(validated) / max(len(generated), 1), 1.0)
-    
-    # Average validation quality
-    val_scores = [s.get("validation_score", 0.0) for s in validated]
-    avg_quality = sum(val_scores) / max(len(val_scores), 1)
-    
-    # Flagging accuracy (reward flagging low-quality)
-    flag_score = min(len(flagged) * 0.25, 1.0) if flagged else 0.5
-
-    return _clamp_score(0.4 * coverage_score + 0.4 * avg_quality + 0.2 * flag_score)
-
-
-def paper_assembly_grader(trajectory: list) -> float:
-    """Grade an agent's paper assembly performance.
-    
-    Evaluates:
-    - Whether assembly was attempted and succeeded
-    - Topic coverage in the final paper
-    - Difficulty distribution balance
-    - Overall paper score
-    
-    Returns a score from 0.0 to 1.0.
-    """
-    if not trajectory:
-        return 0.01
-
-    assembly = [s for s in trajectory if s.get("action_type") == "assemble_paper"]
-    if not assembly:
-        return 0.01
-
-    last_assembly = assembly[-1]
-    if not last_assembly.get("success", False):
-        return 0.1  # Attempted but failed
-
-    # Use the final paper score directly
-    paper_score = last_assembly.get("final_paper_score", 0.0)
-    topic_coverage = last_assembly.get("topic_coverage_score", 0.0)
-    
-    # Check difficulty distribution
-    diff_dist = last_assembly.get("difficulty_distribution", {})
-    total_q = sum(diff_dist.values()) if diff_dist else 0
-    if total_q > 0:
-        ideal = {"easy": 0.30, "medium": 0.50, "hard": 0.20}
-        actual = {k: diff_dist.get(k, 0) / total_q for k in ideal}
-        deviation = sum(abs(actual[k] - ideal[k]) for k in ideal) / len(ideal)
-        balance_score = max(0.0, 1.0 - deviation)
-    else:
-        balance_score = 0.0
-
-    return _clamp_score(0.4 * paper_score + 0.3 * topic_coverage + 0.3 * balance_score)
+    def state(self) -> dict:
+        """Return current episode state as a plain dict."""
+        return {
+            "episode_id": self.episode_id,
+            "step_count": self.step_count,
+            "current_subject": getattr(self, "current_subject", ""),
+            "marks_used": self.marks_used,
+            "num_questions": len(self.question_bank),
+            "num_valid": len([q for q in self.question_bank.values() if not q.is_flagged]),
+            "num_flagged": len([q for q in self.question_bank.values() if q.is_flagged]),
+            "num_validated": len([q for q in self.question_bank.values() if q.is_validated]),
+            "paper_assembled": getattr(self, "_paper_assembled", False),
+            # Graders need full question_bank access
+            "question_bank": self.question_bank,
+        }

@@ -1,3 +1,6 @@
+# ExamForge OpenEnv Environment Manifest
+# Validated against OpenEnv spec v1
+
 spec_version: 1
 name: examforge_env
 type: space
@@ -5,11 +8,17 @@ runtime: fastapi
 app: server.app:app
 port: 7860
 version: "1.0.0"
+
 description: >
-  ExamForge: An RL environment for training LLM agents to generate, validate,
-  and assemble high-quality competitive exam papers. Targets JEE, GATE, and 
-  UPSC domains with multi-step reward shaping and programmatic graders.
+  ExamForge: A multi-task RL environment for training LLM agents to generate,
+  validate, and assemble high-quality competitive exam papers targeting India's
+  JEE, GATE, and UPSC examinations. Features programmatic graders, dense reward
+  shaping, and a 3-level difficulty progression from question generation to
+  full paper assembly.
+
 author: "Team ExamForge"
+license: "MIT"
+
 tags:
   - education
   - reasoning
@@ -19,26 +28,53 @@ tags:
   - gate
   - upsc
   - rl-training
+  - openenv
+
 action_class: ExamForgeAction
 observation_class: ExamForgeObservation
 max_episode_steps: 50
 
+# Environment variables required at runtime
+env_vars:
+  - name: API_BASE_URL
+    description: "LLM API endpoint (OpenAI-compatible)"
+    required: false
+    default: "https://router.huggingface.co/v1"
+  - name: MODEL_NAME
+    description: "LLM model identifier"
+    required: false
+    default: "Qwen/Qwen2.5-72B-Instruct"
+  - name: HF_TOKEN
+    description: "HuggingFace API token"
+    required: false
+
+# Three graded tasks — easy → medium → hard
 tasks:
   - name: question_generation
     description: >
-      Generate high-quality MCQ questions across multiple topics for competitive
-      exams. The agent must produce well-formed questions with valid distractors,
-      correct answers, and explanations.
+      EASY: Agent generates 12+ high-quality MCQs across 5+ topics.
+      Grader scores on question count, topic diversity, and marks variety.
+      Expected score range: 0.60–0.99 for a capable agent.
+    difficulty: easy
     grader: server.environment:question_generation_grader
+    max_steps: 20
 
   - name: question_validation
     description: >
-      Validate generated questions using programmatic checks for answer consistency,
-      distractor quality, and difficulty calibration. Flag low-quality questions.
+      MEDIUM: Agent generates questions, validates each one programmatically,
+      and flags low-quality questions. Grader scores on validation coverage,
+      average quality, and precision of flagging decisions.
+      Expected score range: 0.50–0.90 for a capable agent.
+    difficulty: medium
     grader: server.environment:question_validation_grader
+    max_steps: 40
 
   - name: paper_assembly
     description: >
-      Assemble a complete exam paper from validated questions ensuring topic coverage,
-      difficulty balance, and marks constraints are met.
+      HARD: Full pipeline — agent must generate, validate, flag, then assemble
+      a complete balanced paper meeting topic coverage and difficulty distribution
+      targets. Final score based on paper quality metrics.
+      Expected score range: 0.40–0.85 for a capable agent.
+    difficulty: hard
     grader: server.environment:paper_assembly_grader
+    max_steps: 50
