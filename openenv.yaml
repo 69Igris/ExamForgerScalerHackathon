@@ -11,70 +11,83 @@ version: "1.0.0"
 
 description: >
   ExamForge: A multi-task RL environment for training LLM agents to generate,
-  validate, and assemble high-quality competitive exam papers targeting India's
-  JEE, GATE, and UPSC examinations. Features programmatic graders, dense reward
-  shaping, and a 3-level difficulty progression from question generation to
-  full paper assembly.
+  validate, and assemble high-quality competitive exam papers. Targets India's
+  JEE, GATE, and UPSC examinations — 2.5 million candidates annually. Features
+  three difficulty-progressive tasks with programmatic graders, dense reward
+  shaping, and a complete pipeline from question generation to paper assembly.
 
 author: "Team ExamForge"
 license: "MIT"
 
 tags:
+  - openenv
   - education
   - reasoning
   - question-generation
+  - rl-training
   - india
   - jee
   - gate
   - upsc
-  - rl-training
-  - openenv
 
 action_class: ExamForgeAction
 observation_class: ExamForgeObservation
 max_episode_steps: 50
 
-# Environment variables required at runtime
+reward_range: [-1.0, 3.0]
+
+observation_space:
+  type: structured
+  description: "Rich textual state including episode context, question bank status, validation feedback, and paper assembly metrics"
+
+action_space:
+  type: structured
+  actions:
+    - generate_question
+    - validate_question
+    - flag_question
+    - assemble_paper
+
 env_vars:
   - name: API_BASE_URL
-    description: "LLM API endpoint (OpenAI-compatible)"
+    description: "OpenAI-compatible LLM API endpoint"
     required: false
     default: "https://router.huggingface.co/v1"
   - name: MODEL_NAME
-    description: "LLM model identifier"
+    description: "LLM model identifier (e.g. Qwen/Qwen2.5-72B-Instruct)"
     required: false
     default: "Qwen/Qwen2.5-72B-Instruct"
   - name: HF_TOKEN
-    description: "HuggingFace API token"
+    description: "HuggingFace API token for LLM access"
     required: false
 
-# Three graded tasks — easy → medium → hard
 tasks:
   - name: question_generation
     description: >
       EASY: Agent generates 12+ high-quality MCQs across 5+ topics.
-      Grader scores on question count, topic diversity, and marks variety.
-      Expected score range: 0.60–0.99 for a capable agent.
+      Graded on question count (40%), topic diversity (40%), marks variety (20%).
+      Expected score: 0.60-0.99 for capable LLMs.
     difficulty: easy
     grader: server.environment:question_generation_grader
     max_steps: 20
 
   - name: question_validation
     description: >
-      MEDIUM: Agent generates questions, validates each one programmatically,
-      and flags low-quality questions. Grader scores on validation coverage,
-      average quality, and precision of flagging decisions.
-      Expected score range: 0.50–0.90 for a capable agent.
+      MEDIUM: Agent generates questions then validates each programmatically.
+      Flags low-quality items. Graded on validation coverage (40%),
+      average quality score (40%), flagging precision (20%).
+      Expected score: 0.50-0.90 for capable LLMs.
     difficulty: medium
     grader: server.environment:question_validation_grader
     max_steps: 40
 
   - name: paper_assembly
     description: >
-      HARD: Full pipeline — agent must generate, validate, flag, then assemble
-      a complete balanced paper meeting topic coverage and difficulty distribution
-      targets. Final score based on paper quality metrics.
-      Expected score range: 0.40–0.85 for a capable agent.
+      HARD: Full pipeline — generate, validate, flag, then assemble a balanced
+      paper. Graded on assembly completion (30%), topic coverage (30%),
+      difficulty distribution (25%), validation ratio (15%).
+      Targets: 5+ topics, 30% easy/50% medium/20% hard distribution.
+      Expected score: 0.40-0.85 for capable LLMs.
     difficulty: hard
     grader: server.environment:paper_assembly_grader
     max_steps: 50
