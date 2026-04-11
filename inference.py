@@ -197,7 +197,7 @@ def parse_action(raw: str, fallback_type: str = "assemble_paper",
 # These are 15 hardcoded JEE Physics questions.
 # Used as fallback when LLM is unavailable. Guarantees non-zero baseline score.
 
-DETERMINISTIC_QUESTIONS = [
+BASELINE_QUESTIONS = [
     {
         "topic": "Kinematics", "difficulty": "easy", "marks": 1,
         "question_text": "A body is thrown vertically upward with velocity u. The greatest height h to which it will rise is:",
@@ -312,7 +312,7 @@ DETERMINISTIC_QUESTIONS = [
 ]
 
 
-def run_deterministic_task(task_name: str, subject: str, topics: list) -> float:
+def _run_deterministic_episode(task_name: str, subject: str, topics: list) -> float:
     """
     Runs the full pipeline using deterministic hardcoded questions.
     Guarantees reproducible non-zero scores even when LLM is unavailable.
@@ -343,7 +343,7 @@ def run_deterministic_task(task_name: str, subject: str, topics: list) -> float:
 
     try:
         # Phase 1: Generate all 15 questions
-        for q in DETERMINISTIC_QUESTIONS:
+        for q in BASELINE_QUESTIONS:
             if env.marks_used + q["marks"] > 95:
                 break
             action = ExamForgeAction(
@@ -551,7 +551,7 @@ def run_task_question_generation(client: OpenAI) -> float:
 
     except Exception as exc:
         print(f"[DEBUG] LLM task failed: {exc}. Falling back to deterministic policy.", flush=True)
-        return run_deterministic_task(
+        return _run_deterministic_episode(
             "question_generation", "JEE Physics", list(SUBJECT_TOPICS["JEE Physics"])
         )
 
@@ -734,7 +734,7 @@ def run_task_question_validation(client: OpenAI) -> float:
 
     except Exception as exc:
         print(f"[DEBUG] LLM task failed: {exc}. Falling back to deterministic policy.", flush=True)
-        return run_deterministic_task(
+        return _run_deterministic_episode(
             "question_validation", "GATE CS", list(SUBJECT_TOPICS["GATE CS"])
         )
 
@@ -924,7 +924,7 @@ def run_task_paper_assembly(client: OpenAI) -> float:
 
     except Exception as exc:
         print(f"[DEBUG] LLM task failed: {exc}. Falling back to deterministic policy.", flush=True)
-        return run_deterministic_task(
+        return _run_deterministic_episode(
             "paper_assembly", "JEE Mathematics", list(SUBJECT_TOPICS["JEE Mathematics"])
         )
 
