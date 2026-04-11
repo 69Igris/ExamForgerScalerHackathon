@@ -78,14 +78,8 @@ class QuestionRecord:
 
 def question_generation_grader(episode_state: dict) -> float:
     """
-    Grader for the question_generation task.
-
-    Scores based on:
-    - Count of questions generated (max 15 expected)
-    - Topic diversity across generated questions
-    - Marks variety (1, 2, 4 mark questions present)
-
-    Returns float in [0.0, 1.0]
+    Scores how well agent generated questions.
+    Returns float in [0.0, 1.0]. Never returns same score for different inputs.
     """
     question_bank = episode_state.get("question_bank", {})
     if not question_bank:
@@ -94,31 +88,28 @@ def question_generation_grader(episode_state: dict) -> float:
     questions = list(question_bank.values())
     total = len(questions)
 
-    # Score 1: Question count (target = 15, max score at 15+)
+    def get_attr(q, attr, default=None):
+        return getattr(q, attr, q.get(attr, default) if isinstance(q, dict) else default)
+
+    # Metric 1: Count score (target = 15 questions)
     count_score = min(total / 15.0, 1.0)
 
-    # Score 2: Topic diversity (at least 5 different topics)
-    unique_topics = len(set(q.topic for q in questions))
+    # Metric 2: Topic diversity (target = 5+ unique topics)
+    unique_topics = len(set(get_attr(q, "topic", "unknown") for q in questions))
     topic_score = min(unique_topics / 5.0, 1.0)
 
-    # Score 3: Marks variety (should have easy=1, medium=2, hard=4)
-    unique_marks = len(set(q.marks for q in questions))
+    # Metric 3: Marks variety (target = all 3 mark values: 1, 2, 4)
+    unique_marks = len(set(get_attr(q, "marks", 1) for q in questions))
     marks_score = min(unique_marks / 3.0, 1.0)
 
     final = 0.4 * count_score + 0.4 * topic_score + 0.2 * marks_score
-    return round(min(max(final, 0.0), 1.0), 4)
+    return round(float(min(max(final, 0.0), 1.0)), 4)
 
 
 def question_validation_grader(episode_state: dict) -> float:
     """
-    Grader for the question_validation task.
-
-    Scores based on:
-    - Ratio of validated questions to total
-    - Average validation score across validated questions
-    - Correct flagging of low-quality questions
-
-    Returns float in [0.0, 1.0]
+    Scores how well agent validated questions.
+    Returns float in [0.0, 1.0]. Varies with validation quality.
     """
     question_bank = episode_state.get("question_bank", {})
     if not question_bank:
@@ -127,40 +118,39 @@ def question_validation_grader(episode_state: dict) -> float:
     questions = list(question_bank.values())
     total = len(questions)
 
-    validated = [q for q in questions if q.is_validated]
-    flagged = [q for q in questions if q.is_flagged]
+    def get_attr(q, attr, default=None):
+        return getattr(q, attr, q.get(attr, default) if isinstance(q, dict) else default)
 
-    # Score 1: Validation coverage
+    validated = [q for q in questions if get_attr(q, "is_validated", False)]
+    flagged = [q for q in questions if get_attr(q, "is_flagged", False)]
+
+    # Metric 1: What fraction was validated?
     validation_ratio = len(validated) / total if total > 0 else 0.0
 
-    # Score 2: Average quality of validated questions
+    # Metric 2: Average quality of validated questions
+    avg_score = 0.0
     if validated:
-        avg_score = sum(q.validation_score for q in validated) / len(validated)
-    else:
-        avg_score = 0.0
+        scores = [get_attr(q, "validation_score", 0.0) for q in validated]
+        avg_score = sum(scores) / len(scores)
 
-    # Score 3: Correct flagging (flagged low-quality = good)
-    correctly_flagged = sum(
-        1 for q in flagged
-        if q.is_validated and q.validation_score < 0.4
-    )
-    flagging_score = min(correctly_flagged / max(len(flagged), 1), 1.0) if flagged else 0.5
+    # Metric 3: Flagging precision (correctly identified low-quality)
+    if flagged:
+        correct_flags = sum(
+            1 for q in flagged
+            if get_attr(q, "is_validated", False) and get_attr(q, "validation_score", 0.5) < 0.4
+        )
+        flagging_score = min(correct_flags / max(len(flagged), 1), 1.0)
+    else:
+        flagging_score = 0.5  # neutral — no flagging attempted
 
     final = 0.4 * validation_ratio + 0.4 * avg_score + 0.2 * flagging_score
-    return round(min(max(final, 0.0), 1.0), 4)
+    return round(float(min(max(final, 0.0), 1.0)), 4)
 
 
 def paper_assembly_grader(episode_state: dict) -> float:
     """
-    Grader for the paper_assembly task.
-
-    Scores based on:
-    - Whether paper was assembled (done=True via assemble_paper)
-    - Topic coverage score
-    - Difficulty distribution score
-    - Validation ratio of assembled questions
-
-    Returns float in [0.0, 1.0]
+    Scores how well agent assembled a complete, balanced exam paper.
+    Returns float in [0.0, 1.0]. Highest score requires assembly + balance.
     """
     question_bank = episode_state.get("question_bank", {})
     paper_assembled = episode_state.get("paper_assembled", False)
@@ -168,43 +158,45 @@ def paper_assembly_grader(episode_state: dict) -> float:
     if not question_bank:
         return 0.0
 
+    def get_attr(q, attr, default=None):
+        return getattr(q, attr, q.get(attr, default) if isinstance(q, dict) else default)
+
     questions = list(question_bank.values())
-    valid_questions = [q for q in questions if not q.is_flagged]
+    valid_questions = [q for q in questions if not get_attr(q, "is_flagged", False)]
 
     if not valid_questions:
         return 0.0
 
-    # Score 1: Assembly completion bonus
-    assembly_bonus = 0.3 if paper_assembled else 0.0
+    # Metric 1: Assembly completion bonus (must call assemble_paper)
+    assembly_bonus = 0.30 if paper_assembled else 0.0
 
-    # Score 2: Topic coverage
-    unique_topics = len(set(q.topic for q in valid_questions))
+    # Metric 2: Topic coverage (target: 5+ topics)
+    unique_topics = len(set(get_attr(q, "topic", "unknown") for q in valid_questions))
     topic_coverage = min(unique_topics / 5.0, 1.0)
 
-    # Score 3: Difficulty balance (ideal: 30% easy, 50% medium, 20% hard)
+    # Metric 3: Difficulty balance (ideal: 30% easy, 50% medium, 20% hard)
     total_valid = len(valid_questions)
-    easy_ratio = sum(1 for q in valid_questions if q.difficulty == "easy") / total_valid
-    medium_ratio = sum(1 for q in valid_questions if q.difficulty == "medium") / total_valid
-    hard_ratio = sum(1 for q in valid_questions if q.difficulty == "hard") / total_valid
+    easy_ratio = sum(1 for q in valid_questions if get_attr(q, "difficulty", "") == "easy") / total_valid
+    medium_ratio = sum(1 for q in valid_questions if get_attr(q, "difficulty", "") == "medium") / total_valid
+    hard_ratio = sum(1 for q in valid_questions if get_attr(q, "difficulty", "") == "hard") / total_valid
 
-    diff_score = 1.0 - (
+    diff_score = max(0.0, 1.0 - (
         abs(easy_ratio - 0.30) +
         abs(medium_ratio - 0.50) +
         abs(hard_ratio - 0.20)
-    ) / 2.0
-    diff_score = max(0.0, diff_score)
+    ) / 2.0)
 
-    # Score 4: Validation ratio
-    validated_count = sum(1 for q in valid_questions if q.is_validated)
+    # Metric 4: Validation quality
+    validated_count = sum(1 for q in valid_questions if get_attr(q, "is_validated", False))
     validation_ratio = validated_count / total_valid
 
     final = (
         assembly_bonus +
-        0.3 * topic_coverage +
+        0.30 * topic_coverage +
         0.25 * diff_score +
         0.15 * validation_ratio
     )
-    return round(min(max(final, 0.0), 1.0), 4)
+    return round(float(min(max(final, 0.0), 1.0)), 4)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

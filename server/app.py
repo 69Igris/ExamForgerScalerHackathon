@@ -72,46 +72,72 @@ def create_examforge_app() -> FastAPI:
     # Task catalog endpoint for automated evaluation
     @app.get("/tasks")
     async def list_tasks():
-        """Return the task catalog for automated evaluation."""
-        return {
+        """
+        Returns the task catalog for automated evaluation.
+        Required by OpenEnv spec for task discovery.
+        """
+        return JSONResponse({
             "tasks": [
                 {
                     "name": "question_generation",
-                    "description": "Generate high-quality MCQ questions across multiple topics. Easy difficulty.",
+                    "description": (
+                        "EASY: Agent generates 12+ high-quality MCQs across 5+ topics "
+                        "for Indian competitive exams (JEE, GATE, UPSC). Graded on question "
+                        "count, topic diversity, and marks variety."
+                    ),
                     "difficulty": "easy",
                     "grader": "server.environment:question_generation_grader",
-                    "max_steps": 20
+                    "max_steps": 20,
+                    "expected_score_range": [0.60, 0.99],
                 },
                 {
                     "name": "question_validation",
-                    "description": "Generate, validate, and flag questions. Medium difficulty.",
+                    "description": (
+                        "MEDIUM: Agent generates questions then validates each one using "
+                        "programmatic quality checks (answer consistency, distractor quality, "
+                        "difficulty calibration). Flags low-quality items."
+                    ),
                     "difficulty": "medium",
                     "grader": "server.environment:question_validation_grader",
-                    "max_steps": 40
+                    "max_steps": 40,
+                    "expected_score_range": [0.50, 0.90],
                 },
                 {
                     "name": "paper_assembly",
-                    "description": "Full pipeline: generate, validate, flag, assemble a balanced paper. Hard difficulty.",
+                    "description": (
+                        "HARD: Full pipeline — generate, validate, flag, then assemble a "
+                        "complete balanced exam paper meeting topic coverage (5+ topics) and "
+                        "difficulty distribution targets (30% easy, 50% medium, 20% hard)."
+                    ),
                     "difficulty": "hard",
                     "grader": "server.environment:paper_assembly_grader",
-                    "max_steps": 50
-                }
+                    "max_steps": 50,
+                    "expected_score_range": [0.40, 0.85],
+                },
             ]
-        }
+        })
 
     # Grader endpoint for remote scoring
     @app.post("/grader")
     async def run_grader(request: dict = None):
         """
-        Grade a task given episode state or episode_id.
-        Accepts: {"episode_id": "...", "task_name": "..."}
-              or {"task_name": "...", "question_bank": {...}, "paper_assembled": bool}
-        Returns: {"task_name": "...", "score": 0.0-1.0}
+        Grades a task given episode state or episode parameters.
+
+        Request body (all optional):
+        {
+            "task_name": "question_generation" | "question_validation" | "paper_assembly",
+            "episode_id": "optional-existing-episode-id",
+            "question_bank": {},
+            "paper_assembled": false,
+            "marks_used": 0
+        }
+
+        Returns: {"task_name": "...", "score": 0.0-1.0, "grader_used": "..."}
         """
         from server.environment import (
             question_generation_grader,
             question_validation_grader,
-            paper_assembly_grader
+            paper_assembly_grader,
         )
 
         if request is None:
@@ -119,29 +145,53 @@ def create_examforge_app() -> FastAPI:
 
         task_name = request.get("task_name", "paper_assembly")
 
-        # Build episode state from request or use empty state
+        # Build episode state for grading
         episode_state = {
             "question_bank": request.get("question_bank", {}),
             "paper_assembled": request.get("paper_assembled", False),
             "marks_used": request.get("marks_used", 0),
+            "step_count": request.get("step_count", 0),
         }
 
         grader_map = {
-            "question_generation": question_generation_grader,
-            "question_validation": question_validation_grader,
-            "paper_assembly": paper_assembly_grader,
+            "question_generation": (
+                question_generation_grader,
+                "server.environment:question_generation_grader"
+            ),
+            "question_validation": (
+                question_validation_grader,
+                "server.environment:question_validation_grader"
+            ),
+            "paper_assembly": (
+                paper_assembly_grader,
+                "server.environment:paper_assembly_grader"
+            ),
         }
 
-        grader_fn = grader_map.get(task_name, paper_assembly_grader)
+        if task_name not in grader_map:
+            return JSONResponse(
+                {"error": f"Unknown task: {task_name}. Valid tasks: {list(grader_map.keys())}"},
+                status_code=400
+            )
+
+        grader_fn, grader_path = grader_map[task_name]
 
         try:
             score = grader_fn(episode_state)
             score = float(min(max(score, 0.0), 1.0))
+            return JSONResponse({
+                "task_name": task_name,
+                "score": score,
+                "grader_used": grader_path,
+            })
         except Exception as e:
             print(f"[DEBUG] Grader error: {e}", flush=True)
-            score = 0.0
-
-        return {"task_name": task_name, "score": score}
+            return JSONResponse({
+                "task_name": task_name,
+                "score": 0.0,
+                "grader_used": grader_path,
+                "error": str(e),
+            }, status_code=500)
 
     return app
 

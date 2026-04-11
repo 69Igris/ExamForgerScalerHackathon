@@ -87,3 +87,6 @@ class ExamForgeObservation(Observation):
     # Topics available in this episode
     available_topics: List[str] = Field(default_factory=list)
     paper_constraints: Dict[str, Any] = Field(default_factory=dict)
+    available_actions: List[str] = Field(
+        default_factory=lambda: ["generate_question", "validate_question", "flag_question", "assemble_paper"]
+    )
