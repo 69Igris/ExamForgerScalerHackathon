@@ -260,29 +260,117 @@ class ExamForgeEnvironment(Environment):
             return 0.2
         return 0.0
 
-    def _check_distractor_quality(self, record: QuestionRecord) -> float:
-        """Check all 4 options are non-trivially different and have length > 3."""
-        opts = list(record.options.values())
-        if len(opts) != 4:
+    def _check_distractor_uniqueness(self, record: QuestionRecord) -> float:
+        """
+        Checks that all 4 options are genuinely distinct.
+
+        Detects:
+        - Identical options (score = 0)
+        - Options that are just rephrased versions (token overlap)
+        - Options that are too short to be meaningful (< 2 chars)
+
+        Returns: float 0.0-0.3 (contributes to validation_score)
+        """
+        options = [
+            str(record.options.get("A", "")).strip(),
+            str(record.options.get("B", "")).strip(),
+            str(record.options.get("C", "")).strip(),
+            str(record.options.get("D", "")).strip(),
+        ]
+
+        # Check 1: All options must exist and have meaningful length
+        if any(len(opt) < 2 for opt in options):
             return 0.0
-        # All options should have length > 3
-        if not all(len(str(o).strip()) > 3 for o in opts):
-            return 0.0
-        # All options should be unique
-        if len(set(str(o).strip().lower() for o in opts)) != 4:
-            return 0.0
-        return 0.3
+
+        # Check 2: All 4 options must be unique (case-insensitive)
+        unique_options = set(opt.lower() for opt in options)
+        if len(unique_options) < 4:
+            return 0.0  # Duplicate options detected
+
+        # Check 3: Token overlap — no two options should be >70% similar
+        def token_overlap(s1: str, s2: str) -> float:
+            t1 = set(s1.lower().split())
+            t2 = set(s2.lower().split())
+            if not t1 or not t2:
+                return 0.0
+            return len(t1 & t2) / max(len(t1), len(t2))
+
+        pairs = [(options[i], options[j]) for i in range(4) for j in range(i+1, 4)]
+        max_overlap = max(token_overlap(a, b) for a, b in pairs)
+
+        if max_overlap > 0.7:
+            return 0.1  # Too similar but not identical
+        elif max_overlap > 0.5:
+            return 0.2
+        else:
+            return 0.3  # Good diversity
 
     def _check_difficulty_calibration(self, record: QuestionRecord) -> float:
-        """Check difficulty calibration via explanation length proxy."""
-        exp_len = len(record.explanation)
-        if record.difficulty == "hard" and exp_len > 100:
-            return 0.2
-        elif record.difficulty == "medium" and exp_len > 50:
-            return 0.2
-        elif record.difficulty == "easy" and exp_len > 0:
-            return 0.2
-        return 0.0
+        """
+        Checks if explanation depth matches declared difficulty.
+
+        Uses a simple readability proxy:
+        - Word count as a proxy for complexity
+        - Presence of mathematical notation as indicator of hard questions
+        - Multi-step reasoning indicators (therefore, thus, hence, etc.)
+
+        Returns: float 0.0-0.2 (contributes to validation_score)
+        """
+        explanation = record.explanation or ""
+        difficulty = record.difficulty or "easy"
+
+        word_count = len(explanation.split())
+        has_math = any(c in explanation for c in ['=', '/', '+', '-', '*', '^', '(', ')'])
+        has_reasoning = any(w in explanation.lower() for w in
+                          ['therefore', 'thus', 'hence', 'because', 'since', 'using', 'applying'])
+
+        if difficulty == "easy":
+            return 0.2 if word_count >= 15 else 0.1
+        elif difficulty == "medium":
+            if word_count >= 40 or (word_count >= 25 and has_math):
+                return 0.2
+            elif word_count >= 25:
+                return 0.1
+            return 0.0
+        else:  # hard
+            if word_count >= 60 and (has_math or has_reasoning):
+                return 0.2
+            elif word_count >= 40 and has_math:
+                return 0.15
+            elif word_count >= 40:
+                return 0.1
+            return 0.0
+
+    def _get_difficulty_requirement(self) -> Optional[str]:
+        """
+        Returns a required difficulty if the paper is becoming imbalanced.
+
+        After 10 questions: if <20% are medium -> require medium
+        After 15 questions: if <10% are hard -> require hard
+        After 5 questions: if all same difficulty -> diversify
+
+        This creates ADAPTIVE DIFFICULTY PRESSURE — the environment
+        nudges agents toward pedagogically balanced papers.
+        Returns None if paper is already balanced.
+        """
+        questions = list(self.question_bank.values())
+        total = len(questions)
+
+        if total < 5:
+            return None
+
+        easy_count = sum(1 for q in questions if q.difficulty == "easy")
+        medium_count = sum(1 for q in questions if q.difficulty == "medium")
+        hard_count = sum(1 for q in questions if q.difficulty == "hard")
+
+        if total >= 15 and hard_count / total < 0.10:
+            return "hard"
+        if total >= 10 and medium_count / total < 0.20:
+            return "medium"
+        if total >= 5 and easy_count == total:
+            return "medium"
+
+        return None
 
     # ── core API ─────────────────────────────────────────────────────────────
 
@@ -415,10 +503,16 @@ class ExamForgeEnvironment(Environment):
         self.question_bank[qid] = record
         self.marks_used += action.marks
 
+        # Adaptive difficulty hint
+        difficulty_required = self._get_difficulty_requirement()
+        result_msg = f"Question generated: {action.topic} ({action.difficulty}, {action.marks}m)"
+        if difficulty_required:
+            result_msg += f". Paper balance note: consider generating a '{difficulty_required}' question next."
+
         return self._build_observation(
             reward=0.3,
             done=False,
-            last_action_result=f"Question generated: {action.topic} ({action.difficulty}, {action.marks}m)",
+            last_action_result=result_msg,
             last_action_success=True,
             question_id_generated=qid,
         )
@@ -437,7 +531,7 @@ class ExamForgeEnvironment(Environment):
 
         # Run programmatic checks
         consistency = self._check_answer_consistency(record)
-        distractor = self._check_distractor_quality(record)
+        distractor = self._check_distractor_uniqueness(record)
         calibration = self._check_difficulty_calibration(record)
 
         # Raw score out of 0.7, normalize to 0–1
