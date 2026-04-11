@@ -150,7 +150,12 @@ def create_examforge_app() -> FastAPI:
 app = create_examforge_app()
 
 
-if __name__ == "__main__":
+def main():
+    """Start the ExamForge server — required for multi-mode deployment."""
     import uvicorn
     port = int(os.getenv("PORT", 7860))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    main()
